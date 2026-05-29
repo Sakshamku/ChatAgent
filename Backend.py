@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import pickle
+import re
+import shutil
 import sqlite3
 import tempfile
 from functools import lru_cache
@@ -9,6 +12,7 @@ from typing import Annotated, Any, Dict, Optional, TypedDict
 import requests
 from dotenv import load_dotenv
 
+from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
 from langchain_mistralai import ChatMistralAI
@@ -23,7 +27,10 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from database import (
     create_conversation, save_message, load_conversation,
     get_all_conversations, delete_conversation, save_document_metadata,
-    get_document_metadata, update_conversation_title, get_conversation_title
+    get_document_metadata, update_conversation_title, get_conversation_title,
+    get_coding_profiles, get_latest_coding_stats, get_topic_stats,
+    save_mock_interview_question, get_latest_mock_interview,
+    save_mock_interview_answer
 )
 from utils import (
     generate_thread_id, generate_chat_title, convert_langchain_messages_to_dict,
@@ -50,6 +57,37 @@ load_dotenv()
 
 _THREAD_RETRIEVERS: Dict[str, Any] = {}
 _THREAD_METADATA: Dict[str, dict] = {}
+VECTOR_STORE_DIR = os.path.join(os.path.dirname(__file__), "memory", "vectorstores")
+FALLBACK_RETRIEVER_FILE = "tfidf_retriever.pkl"
+
+
+class TfidfRetriever:
+    """Small offline retriever used when Hugging Face embeddings are unavailable."""
+
+    def __init__(self, texts: list[str], metadatas: list[dict], k: int = 3):
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        self.texts = texts
+        self.metadatas = metadatas
+        self.k = k
+        self.vectorizer = TfidfVectorizer(stop_words="english", max_features=20000)
+        self.matrix = self.vectorizer.fit_transform(texts)
+
+    def invoke(self, query: str):
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        if not self.texts:
+            return []
+
+        query_vector = self.vectorizer.transform([query])
+        scores = cosine_similarity(query_vector, self.matrix).ravel()
+        top_indices = scores.argsort()[::-1][: self.k]
+
+        return [
+            Document(page_content=self.texts[index], metadata=self.metadatas[index])
+            for index in top_indices
+            if scores[index] > 0
+        ]
 
 # =========================================================
 # Cached LLM
@@ -72,7 +110,7 @@ def get_embeddings():
 
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
+        model_kwargs={"device": "cpu", "local_files_only": True},
         encode_kwargs={"batch_size": 64},
     )
 
@@ -94,10 +132,94 @@ def get_checkpointer():
 # =========================================================
 
 def _get_retriever(thread_id: Optional[str]):
-    if thread_id and thread_id in _THREAD_RETRIEVERS:
-        return _THREAD_RETRIEVERS[thread_id]
+    if not thread_id:
+        return None
+
+    thread_key = str(thread_id)
+
+    if thread_key in _THREAD_RETRIEVERS:
+        return _THREAD_RETRIEVERS[thread_key]
+
+    index_path = _thread_vector_store_path(thread_key)
+    if os.path.isdir(index_path):
+        fallback_path = _thread_fallback_retriever_path(thread_key)
+        if os.path.isfile(fallback_path):
+            try:
+                with open(fallback_path, "rb") as retriever_file:
+                    retriever = pickle.load(retriever_file)
+                _THREAD_RETRIEVERS[thread_key] = retriever
+                return retriever
+            except Exception as exc:
+                print(f"Error loading fallback retriever for thread {thread_key}: {exc}")
+
+        try:
+            from langchain_community.vectorstores import FAISS
+
+            vector_store = FAISS.load_local(
+                index_path,
+                get_embeddings(),
+                allow_dangerous_deserialization=True,
+            )
+            retriever = vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": 3},
+            )
+            _THREAD_RETRIEVERS[thread_key] = retriever
+            return retriever
+        except Exception as exc:
+            print(f"Error loading vector store for thread {thread_key}: {exc}")
 
     return None
+
+
+def _thread_vector_store_path(thread_id: str) -> str:
+    safe_thread_id = sanitize_filename(str(thread_id))
+    return os.path.join(VECTOR_STORE_DIR, safe_thread_id)
+
+
+def _thread_fallback_retriever_path(thread_id: str) -> str:
+    return os.path.join(_thread_vector_store_path(thread_id), FALLBACK_RETRIEVER_FILE)
+
+
+def _format_pdf_context(thread_id: Optional[str], query: str) -> str:
+    if not thread_id:
+        return ""
+
+    metadata = thread_document_metadata(str(thread_id))
+    if not metadata:
+        return ""
+
+    retriever = _get_retriever(str(thread_id))
+    if retriever is None:
+        return (
+            "\n\nUPLOADED PDF STATUS:\n"
+            f"- A PDF named {metadata.get('filename', 'uploaded.pdf')} is attached, "
+            "but its searchable index is not available. Ask the user to re-upload it."
+        )
+
+    docs = retriever.invoke(query)
+    if not docs:
+        return (
+            "\n\nUPLOADED PDF STATUS:\n"
+            f"- A PDF named {metadata.get('filename', 'uploaded.pdf')} is attached, "
+            "but no relevant text was retrieved for this question."
+        )
+
+    context_parts = []
+    for index, doc in enumerate(docs, start=1):
+        page = doc.metadata.get("page")
+        page_label = f" page {page + 1}" if isinstance(page, int) else ""
+        context_parts.append(
+            f"[Excerpt {index}{page_label}]\n{doc.page_content.strip()}"
+        )
+
+    return (
+        "\n\nUPLOADED PDF CONTEXT:\n"
+        f"Filename: {metadata.get('filename', 'uploaded.pdf')}\n"
+        "Use this extracted document text to answer the user's request. "
+        "Do not claim you cannot access uploads when context is present.\n\n"
+        + "\n\n".join(context_parts)
+    )
 
 # =========================================================
 # PDF Ingestion
@@ -122,6 +244,8 @@ def ingest_pdf(
 
     # Sanitize filename
     safe_filename = sanitize_filename(filename or "uploaded.pdf")
+    thread_key = str(thread_id)
+    save_uploaded_file(thread_key, safe_filename, file_bytes)
     
     with tempfile.NamedTemporaryFile(
         delete=False,
@@ -142,24 +266,39 @@ def ingest_pdf(
 
         chunks = splitter.split_documents(docs)
 
-        # Batch embed for speed: encode all texts at once, then add to FAISS
-        embeddings = get_embeddings()
         texts = [chunk.page_content for chunk in chunks]
         metadatas = [chunk.metadata for chunk in chunks]
 
-        # FAISS.from_texts uses batch encoding internally
-        vector_store = FAISS.from_texts(
-            texts,
-            embeddings,
-            metadatas=metadatas
-        )
+        if not any(text.strip() for text in texts):
+            raise ValueError("No readable text found in this PDF")
 
-        retriever = vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 3}
-        )
+        index_path = _thread_vector_store_path(thread_key)
+        if os.path.isdir(index_path):
+            shutil.rmtree(index_path)
+        os.makedirs(index_path, exist_ok=True)
 
-        _THREAD_RETRIEVERS[str(thread_id)] = retriever
+        try:
+            # Batch embed for speed: encode all texts at once, then add to FAISS.
+            # local_files_only prevents upload from hanging on blocked Hugging Face network calls.
+            embeddings = get_embeddings()
+            vector_store = FAISS.from_texts(
+                texts,
+                embeddings,
+                metadatas=metadatas
+            )
+            vector_store.save_local(index_path)
+
+            retriever = vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": 3}
+            )
+        except Exception as exc:
+            print(f"FAISS/Hugging Face embedding unavailable, using TF-IDF fallback: {exc}")
+            retriever = TfidfRetriever(texts, metadatas, k=3)
+            with open(_thread_fallback_retriever_path(thread_key), "wb") as retriever_file:
+                pickle.dump(retriever, retriever_file)
+
+        _THREAD_RETRIEVERS[thread_key] = retriever
 
         metadata = {
             "filename": safe_filename,
@@ -167,7 +306,7 @@ def ingest_pdf(
             "chunks": len(chunks),
         }
 
-        _THREAD_METADATA[str(thread_id)] = metadata
+        _THREAD_METADATA[thread_key] = metadata
         
         # Save to database
         save_document_metadata(
@@ -324,6 +463,232 @@ def list_uploaded_files(
         return {"files": [], "message": "No files uploaded yet"}
     return {"files": files, "message": f"{len(files)} file(s) available"}
 
+
+def _resume_interview_context(thread_id: Optional[str]) -> dict:
+    if not thread_id:
+        return {"has_resume": False, "text": "", "filename": None}
+
+    metadata = thread_document_metadata(str(thread_id))
+    retriever = _get_retriever(str(thread_id))
+    if not metadata or retriever is None:
+        return {"has_resume": False, "text": "", "filename": None}
+
+    docs = retriever.invoke(
+        "resume projects technical skills internship experience education achievements"
+    )
+    text = "\n\n".join(doc.page_content.strip() for doc in docs if doc.page_content.strip())
+    return {
+        "has_resume": bool(text),
+        "text": text[:4000],
+        "filename": metadata.get("filename"),
+    }
+
+
+def _coding_interview_context(thread_id: Optional[str]) -> dict:
+    user_id = thread_id or "default_user"
+    profiles = get_coding_profiles(user_id)
+    platforms = [profile["platform"] for profile in profiles] or ["leetcode"]
+
+    stats: dict[str, Any] = {}
+    all_topics: list[dict[str, Any]] = []
+    for platform in platforms:
+        latest = get_latest_coding_stats(user_id, platform)
+        if latest:
+            stats[platform] = latest
+        for topic in get_topic_stats(user_id, platform):
+            all_topics.append({**topic, "platform": platform})
+
+    weak_topics = sorted(
+        all_topics,
+        key=lambda topic: int(topic.get("solved_count") or 0),
+    )[:5]
+
+    return {
+        "profiles": [{"platform": p["platform"], "username": p["username"]} for p in profiles],
+        "stats": stats,
+        "weak_topics": weak_topics,
+    }
+
+
+def _pick_resume_project(resume_text: str) -> str:
+    candidates = re.findall(
+        r"([A-Z][A-Za-z0-9 +&'/-]{4,80}(?:Planner|System|App|Platform|Portal|Assistant|Algorithm|Project))",
+        resume_text,
+    )
+    if candidates:
+        return candidates[0].strip()
+    return "one of your resume projects"
+
+
+@tool
+def start_mock_interview(
+    target_role: str = "software engineer",
+    focus: str = "mixed",
+    difficulty: str = "medium",
+    thread_id: Optional[str] = None,
+):
+    """
+    Start a personalized mock interview using the uploaded resume and coding profile data.
+
+    Use this when the user asks to start a mock interview, practice interview,
+    resume-based interview, project interview, or DSA interview.
+
+    Args:
+        target_role: Target job role, such as "software engineer" or "AI intern"
+        focus: "mixed", "resume", "project", "dsa", or "behavioral"
+        difficulty: "easy", "medium", or "hard"
+        thread_id: Thread ID for resume/coding profile lookup
+    """
+    resume = _resume_interview_context(thread_id)
+    coding = _coding_interview_context(thread_id)
+
+    focus_key = focus.lower().strip()
+    weak_topic = (
+        coding["weak_topics"][0]["topic_name"]
+        if coding["weak_topics"]
+        else "arrays, graphs, or dynamic programming"
+    )
+    project_name = _pick_resume_project(resume["text"]) if resume["has_resume"] else "your strongest project"
+
+    if focus_key in {"dsa", "coding"}:
+        question = (
+            f"You are interviewing for a {target_role} role. "
+            f"Let's practice a {difficulty} DSA question from your weaker area: {weak_topic}. "
+            "Explain your approach for this problem: given a realistic input size, how would you choose the data "
+            "structure, analyze complexity, and handle edge cases before coding?"
+        )
+        expected_points = [
+            "clarifies constraints and edge cases",
+            "chooses an appropriate data structure or algorithm",
+            "explains time and space complexity",
+            "walks through an example",
+            "mentions tradeoffs or optimizations",
+        ]
+    elif focus_key in {"resume", "project"}:
+        question = (
+            f"For a {target_role} interview, walk me through {project_name}. "
+            "What problem did it solve, what architecture or algorithm did you use, what was your personal "
+            "contribution, and how would you improve it if you had one more week?"
+        )
+        expected_points = [
+            "states the problem and users clearly",
+            "explains architecture or algorithm choices",
+            "identifies personal contribution",
+            "discusses measurable impact or outcome",
+            "proposes a realistic improvement",
+        ]
+    elif focus_key == "behavioral":
+        question = (
+            f"Tell me about a challenging technical situation from your resume that is relevant to a "
+            f"{target_role} role. Use the STAR format and include what you learned."
+        )
+        expected_points = [
+            "uses situation-task-action-result structure",
+            "shows ownership",
+            "explains technical challenge",
+            "includes a concrete result",
+            "reflects on learning",
+        ]
+    else:
+        question = (
+            f"We'll do a mixed {target_role} mock interview. First question: choose one resume project, "
+            f"preferably {project_name}, and explain how its core technical idea works. Then connect it to "
+            f"one DSA topic you want to improve, such as {weak_topic}."
+        )
+        expected_points = [
+            "selects a relevant resume project",
+            "explains the core technical idea",
+            "connects implementation to DSA or system design concepts",
+            "communicates clearly and concisely",
+            "mentions tradeoffs or improvements",
+        ]
+
+    interview_id = save_mock_interview_question(
+        thread_id or "default",
+        target_role,
+        focus_key,
+        difficulty,
+        question,
+        expected_points,
+    )
+
+    return {
+        "interview_id": interview_id,
+        "target_role": target_role,
+        "focus": focus_key,
+        "difficulty": difficulty,
+        "question": question,
+        "expected_points": expected_points,
+        "resume_used": resume["has_resume"],
+        "resume_file": resume["filename"],
+        "coding_profiles": coding["profiles"],
+        "weak_topics": coding["weak_topics"],
+        "instruction": "Ask the question only, then wait for the user's answer. Do not score yet.",
+    }
+
+
+@tool
+def evaluate_mock_interview_answer(
+    answer: str,
+    thread_id: Optional[str] = None,
+):
+    """
+    Score the user's latest mock interview answer and provide feedback.
+
+    Use this after the user answers a mock interview question.
+
+    Args:
+        answer: The user's interview answer
+        thread_id: Thread ID for interview state lookup
+    """
+    latest = get_latest_mock_interview(thread_id or "default")
+    if not latest:
+        return {
+            "error": "No active mock interview question found. Start a mock interview first."
+        }
+
+    normalized_answer = answer.lower()
+    expected_points = latest.get("expected_points", [])
+    covered_points = []
+    missed_points = []
+
+    for point in expected_points:
+        keywords = [
+            word for word in re.findall(r"[a-zA-Z]{4,}", point.lower())
+            if word not in {"explains", "mentions", "states", "shows", "includes"}
+        ]
+        if any(keyword in normalized_answer for keyword in keywords):
+            covered_points.append(point)
+        else:
+            missed_points.append(point)
+
+    word_count = len(answer.split())
+    structure_score = 20 if any(marker in normalized_answer for marker in ["first", "then", "finally", "because"]) else 10
+    depth_score = min(25, max(5, word_count // 8))
+    coverage_score = int((len(covered_points) / max(1, len(expected_points))) * 35)
+    specificity_score = 20 if re.search(r"\b\d+%?|\bapi\b|\bdatabase\b|\balgorithm\b|\bcomplexity\b|\buser\b", normalized_answer) else 10
+    total_score = min(100, structure_score + depth_score + coverage_score + specificity_score)
+
+    feedback = {
+        "question": latest["question"],
+        "score": total_score,
+        "covered_points": covered_points,
+        "missed_points": missed_points,
+        "strengths": [
+            "You gave enough detail to evaluate." if word_count >= 45 else "You answered directly.",
+            "Your answer touched the expected rubric." if covered_points else "You stayed on topic.",
+        ],
+        "improvements": [
+            "Use a clearer structure: problem, approach, tradeoffs, result.",
+            "Add concrete metrics, constraints, complexity, or impact.",
+            "Tie the answer back to your resume or target role.",
+        ],
+        "next_question_hint": "Ask start_mock_interview again for the next question, or request a follow-up.",
+    }
+
+    save_mock_interview_answer(int(latest["id"]), answer, total_score, feedback)
+    return feedback
+
 # =========================================================
 # Tools Setup
 # =========================================================
@@ -334,6 +699,8 @@ tools = [
     rag_tool,
     python_interpreter,
     list_uploaded_files,
+    start_mock_interview,
+    evaluate_mock_interview_answer,
     # Coding Profile Analytics Tools
     get_leetcode_stats,
     get_gfg_stats,
@@ -369,6 +736,8 @@ def chat_node(state: ChatState, config=None):
             .get("thread_id")
         )
 
+    last_user_content = ""
+
     # Save new messages to database
     if thread_id and state.get("messages"):
         # Get only new messages (last one for user input)
@@ -377,6 +746,7 @@ def chat_node(state: ChatState, config=None):
             # Save the last user message if it's a human message
             last_message = messages[-1]
             if isinstance(last_message, HumanMessage):
+                last_user_content = str(last_message.content)
                 save_message(thread_id, "user", last_message.content)
                 
                 # Generate and save title if this is the first message
@@ -384,6 +754,8 @@ def chat_node(state: ChatState, config=None):
                 if not existing_title:
                     title = generate_chat_title(last_message.content)
                     create_conversation(thread_id, title)
+
+    pdf_context = _format_pdf_context(thread_id, last_user_content)
 
     system_message = SystemMessage(
         content=(
@@ -413,8 +785,15 @@ def chat_node(state: ChatState, config=None):
             "- When the user asks about connected profiles, use list_connected_profiles.\n"
             "- Always pass thread_id=" + str(thread_id) + " to these tools.\n"
             "- After fetching stats, provide insightful analysis and actionable recommendations.\n\n"
+            "MOCK INTERVIEW AGENT:\n"
+            "- When the user asks to start a mock interview, practice interview, resume interview, project interview, or DSA interview, call start_mock_interview with thread_id=" + str(thread_id) + ".\n"
+            "- Ask exactly one interview question at a time and wait for the user's answer.\n"
+            "- When the user answers an active mock interview question, call evaluate_mock_interview_answer with thread_id=" + str(thread_id) + " and score the answer.\n"
+            "- After scoring, give concise feedback, a stronger sample answer outline, and offer the next question.\n\n"
             "TOOL USAGE:\n"
-            "- Use rag_tool for PDF questions with thread_id=" + str(thread_id) + ".\n"
+            "- If UPLOADED PDF CONTEXT is provided below, answer from that context directly.\n"
+            "- Never say you cannot access file uploads when UPLOADED PDF CONTEXT is present.\n"
+            "- Use rag_tool for follow-up PDF questions with thread_id=" + str(thread_id) + ".\n"
             "- Use python_interpreter for Python execution (math, data analysis, charts, file processing).\n"
             "- Use list_uploaded_files to check available files before analysis.\n"
             "- When generating charts, use matplotlib savefig() to save them.\n"
@@ -425,6 +804,7 @@ def chat_node(state: ChatState, config=None):
             "- Add helpful comments explaining key logic.\n"
             "- Follow language-specific conventions and best practices.\n"
             "- Suggest alternative approaches when relevant."
+            + pdf_context
         )
     )
 
