@@ -13,3 +13,24 @@ __pycache__/
 # Build files
 dist/
 build/
+.env
+.env.*
+!.env.example
+
+.venv/
+.vnv/
+.vnv
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+*.db
+*.db-shm
+*.db-wal
+
+node_modules/
+.next/
+out/
+dist/
+build/
