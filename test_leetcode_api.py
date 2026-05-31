@@ -1,6 +1,8 @@
-"""Quick test script for LeetCode API"""
-import requests
 import json
+import os
+
+import pytest
+import requests
 
 url = "https://leetcode.com/graphql"
 headers = {
@@ -8,8 +10,7 @@ headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
 
-# Introspect the nested type
-query = """
+QUERY_TAG_COUNTS_CATEGORY = """
 {
   __type(name: "TagProblemCountsCategoryNode") {
     fields {
@@ -30,11 +31,8 @@ query = """
   }
 }
 """
-resp = requests.post(url, json={"query": query}, headers=headers, timeout=15)
-print(f"Introspection 1: {json.dumps(resp.json(), indent=2)[:3000]}")
 
-# Introspect the tag node type
-query2 = """
+QUERY_TAG_NODE = """
 {
   __type(name: "TagProblemCountNode") {
     fields {
@@ -51,11 +49,8 @@ query2 = """
   }
 }
 """
-resp2 = requests.post(url, json={"query": query2}, headers=headers, timeout=15)
-print(f"\nIntrospection 2: {json.dumps(resp2.json(), indent=2)[:3000]}")
 
-# Try the actual query with nested fields
-query3 = """
+QUERY_SKILL_STATS = """
 query skillStats($username: String!) {
     matchedUser(username: $username) {
         tagProblemCounts {
@@ -78,7 +73,36 @@ query skillStats($username: String!) {
     }
 }
 """
-resp3 = requests.post(url, json={"query": query3, "variables": {"username": "sakshamkumar352"}}, headers=headers, timeout=15)
-print(f"\nActual Query Status: {resp3.status_code}")
-print(json.dumps(resp3.json(), indent=2)[:3000])
+
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_LEETCODE_LIVE_TESTS") != "1",
+    reason="Set RUN_LEETCODE_LIVE_TESTS=1 to run live LeetCode API checks.",
+)
+
+
+def _post_graphql(query: str, variables: dict | None = None) -> dict:
+    response = requests.post(
+        url,
+        json={"query": query, "variables": variables or {}},
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    assert "errors" not in payload, json.dumps(payload["errors"], indent=2)
+    return payload
+
+
+def test_leetcode_tag_count_schema_supports_skill_stats():
+    category_schema = _post_graphql(QUERY_TAG_COUNTS_CATEGORY)
+    tag_schema = _post_graphql(QUERY_TAG_NODE)
+    skill_stats = _post_graphql(
+        QUERY_SKILL_STATS,
+        {"username": os.getenv("LEETCODE_TEST_USERNAME", "sakshamkumar352")},
+    )
+
+    assert category_schema["data"]["__type"]["fields"]
+    assert tag_schema["data"]["__type"]["fields"]
+    assert skill_stats["data"]["matchedUser"]["tagProblemCounts"]
 
