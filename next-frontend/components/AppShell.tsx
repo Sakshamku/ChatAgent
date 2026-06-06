@@ -59,7 +59,7 @@ export default function AppShell() {
           Start the API server from the project root, then restart the Next.js dev server:
         </p>
         <code className="rounded bg-zinc-100 px-3 py-2 text-xs dark:bg-zinc-900">
-          myvnv\Scripts\uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+          myvnv\Scripts\uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
         </code>
       </div>
     );

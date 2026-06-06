@@ -28,13 +28,32 @@ export async function POST(
     return new Response(detail, { status: upstream.status });
   }
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = upstream.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) controller.enqueue(value);
+        }
+      } catch (error) {
+        controller.error(error);
+      } finally {
+        controller.close();
+      }
     },
+  });
+
+  const headers = new Headers(upstream.headers);
+  headers.set("Content-Type", "text/event-stream; charset=utf-8");
+  headers.set("Cache-Control", "no-cache, no-transform");
+  headers.set("Connection", "keep-alive");
+  headers.set("X-Accel-Buffering", "no");
+  headers.delete("content-length");
+
+  return new Response(stream, {
+    status: upstream.status,
+    headers,
   });
 }

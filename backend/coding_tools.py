@@ -13,21 +13,21 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from coding_platforms.leetcode import (
+from backend.coding_platforms.leetcode import (
     fetch_leetcode_profile, fetch_leetcode_topics, fetch_leetcode_contests
 )
-from coding_platforms.gfg import fetch_gfg_profile
-from coding_platforms.analytics import (
+from backend.coding_platforms.gfg import fetch_gfg_profile
+from backend.coding_platforms.analytics import (
     analyze_topics, get_weakest_topic, get_strongest_topic,
     generate_dsa_roadmap, estimate_faang_readiness,
     get_interview_readiness_score, get_daily_recommendations
 )
-from coding_platforms.charts import (
+from backend.coding_platforms.charts import (
     create_topic_distribution_chart, create_difficulty_bar_chart,
     create_contest_rating_chart, create_progress_trend_chart,
     create_faang_radar_chart
 )
-from database import (
+from backend.database import (
     save_coding_profile, get_coding_profiles, delete_coding_profile,
     save_coding_stats, get_latest_coding_stats,
     save_topic_stats, get_topic_stats,

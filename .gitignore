@@ -1,22 +1,10 @@
-# Node
-node_modules/
-
-# Python
-myvnv/
-venv/
-__pycache__/
-*.pyc
-
 # Environment variables
-.env
-
-# Build files
-dist/
-build/
 .env
 .env.*
 !.env.example
 
+# Python environments and caches
+myvnv/
 .venv/
 .vnv/
 .vnv
@@ -24,13 +12,21 @@ venv/
 env/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
+# Local data and generated artifacts
 *.db
 *.db-shm
 *.db-wal
+data/*
+!data/.gitkeep
 
+# Node and frontend build output
 node_modules/
 .next/
 out/
 dist/
 build/
+next-frontend/node_modules/
+next-frontend/.next/
+next-frontend/tsconfig.tsbuildinfo

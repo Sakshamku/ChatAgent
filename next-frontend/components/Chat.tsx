@@ -4,7 +4,6 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   FileText,
   Loader2,
-  MessagesSquare,
   Plus,
   SendHorizontal,
   X,
@@ -242,12 +241,6 @@ export default function Chat({ threadId }: { threadId: string }) {
     }
   };
 
-  const startMockInterview = () => {
-    sendMessage(
-      "Start a mixed mock interview for a software engineer role using my uploaded resume projects and my weakest DSA topics. Ask me one question at a time and score my answer after I respond."
-    );
-  };
-
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
@@ -471,17 +464,6 @@ export default function Chat({ threadId }: { threadId: string }) {
                   ) : (
                     <Plus className="h-5 w-5" aria-hidden="true" />
                   )}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={startMockInterview}
-                  disabled={isStreaming}
-                  title="Start mock interview"
-                  className="flex h-9 items-center gap-2 rounded-full border border-zinc-300 bg-white px-3 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                >
-                  <MessagesSquare className="h-4 w-4" aria-hidden="true" />
-                  <span>Mock Interview</span>
                 </button>
               </div>
 

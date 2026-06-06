@@ -24,7 +24,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 # Import database and utils
-from database import (
+from backend.database import (
     create_conversation, save_message, load_conversation,
     get_all_conversations, delete_conversation, save_document_metadata,
     get_document_metadata, update_conversation_title, get_conversation_title,
@@ -32,16 +32,16 @@ from database import (
     save_mock_interview_question, get_latest_mock_interview,
     save_mock_interview_answer
 )
-from utils import (
+from backend.utils import (
     generate_thread_id, generate_chat_title, convert_langchain_messages_to_dict,
     convert_dict_to_langchain_messages, get_message_role, sanitize_filename
 )
-from code_interpreter import (
+from backend.code_interpreter import (
     execute_python, format_execution_result,
     save_uploaded_file, list_workspace_files,
     get_workspace_file_path, cleanup_old_workspaces
 )
-from coding_tools import (
+from backend.coding_tools import (
     get_leetcode_stats, get_gfg_stats,
     analyze_coding_topics, weakest_topic_analysis,
     strongest_topic_analysis, generate_coding_roadmap,
@@ -57,7 +57,9 @@ load_dotenv()
 
 _THREAD_RETRIEVERS: Dict[str, Any] = {}
 _THREAD_METADATA: Dict[str, dict] = {}
-VECTOR_STORE_DIR = os.path.join(os.path.dirname(__file__), "memory", "vectorstores")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+VECTOR_STORE_DIR = os.path.join(PROJECT_ROOT, "memory", "vectorstores")
 FALLBACK_RETRIEVER_FILE = "tfidf_retriever.pkl"
 
 
@@ -98,6 +100,7 @@ def get_llm():
     return ChatMistralAI(
         model="mistral-small-latest",
         api_key=os.getenv("MISTRAL_API_KEY"),
+        streaming=True,
     )
 
 # =========================================================
@@ -120,8 +123,9 @@ def get_embeddings():
 
 @lru_cache(maxsize=1)
 def get_checkpointer():
+    os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(
-        database="chatbot.db",
+        database=os.path.join(DATA_DIR, "chatbot.db"),
         check_same_thread=False
     )
 
@@ -922,6 +926,6 @@ def search_conversations(query: str):
     """
     Search conversations by title or content.
     """
-    from database import search_conversations as db_search
+    from backend.database import search_conversations as db_search
     return db_search(query)
 

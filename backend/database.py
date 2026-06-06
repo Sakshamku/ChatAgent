@@ -5,6 +5,7 @@ Handles SQLite operations for conversations, messages, and documents.
 
 import sqlite3
 import threading
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from contextlib import contextmanager
@@ -12,12 +13,17 @@ import json
 
 # Thread-safe database connection
 _local = threading.local()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+CHAT_HISTORY_DB = DATA_DIR / "chat_history.db"
 
 def get_db_connection():
     """Get thread-local database connection"""
     if not hasattr(_local, 'connection'):
-        _local.connection = sqlite3.connect('chat_history.db', check_same_thread=False)
+        DATA_DIR.mkdir(exist_ok=True)
+        _local.connection = sqlite3.connect(CHAT_HISTORY_DB, check_same_thread=False)
         _local.connection.row_factory = sqlite3.Row  # Enable dict-like access
+        _local.connection.execute("PRAGMA foreign_keys = ON")
     return _local.connection
 
 @contextmanager

@@ -22,47 +22,21 @@ import {
   Trophy,
   XCircle,
 } from "lucide-react";
-import { API_BASE } from "../lib/api";
+import { API_BASE, authFetch } from "../lib/api";
+import { useAuth } from "../contexts/AuthContext";
 
-type TestType = "dsa" | "aptitude" | "verbal" | "logical" | "programming";
+type Arena = "dsa" | "aptitude" | "verbal" | "reasoning" | "programming";
+type McqArena = Exclude<Arena, "dsa">;
 
 interface TestCard {
-  id: TestType;
+  id: Arena;
   title: string;
   description: string;
   accent: string;
   icon: React.ElementType;
 }
 
-interface Question {
-  id: number;
-  topic: string;
-  difficulty: string;
-  question_type: string;
-  prompt: string;
-  options: string[];
-  correct_answer: string;
-  explanation: string;
-}
-
-interface ActiveAttempt {
-  attempt_id: number;
-  question_id: number;
-  test_type: TestType;
-  title: string;
-  timer_seconds: number;
-  question: Question;
-}
-
-interface Evaluation {
-  is_correct: boolean;
-  xp: number;
-  correct_answer: string;
-  explanation: string;
-  feedback: string;
-}
-
-interface AptitudeQuestion {
+interface MockQuestion {
   id: number;
   number: number;
   topic: string;
@@ -70,40 +44,47 @@ interface AptitudeQuestion {
   question_type: string;
   prompt: string;
   options: string[];
+  correct_answer: string;
+  explanation: string;
 }
 
-interface AptitudeAttempt {
-  attempt_id: number;
+interface TwentyQuestionTest {
+  arena: McqArena;
   title: string;
   timer_seconds: number;
-  questions: AptitudeQuestion[];
+  questions: MockQuestion[];
 }
 
-interface AptitudeResult {
+interface DsaTest {
+  arena: "dsa";
+  title: string;
+  timer_seconds: number;
+  question: MockQuestion;
+  profile_context?: {
+    total_solved?: number;
+    topics?: Array<{ topic_name?: string; name?: string; solved_count?: number }>;
+    contests?: unknown[];
+  };
+}
+
+type ArenaTest = TwentyQuestionTest | DsaTest;
+
+interface TestResult {
   score: number;
   total: number;
   correct: number;
   wrong: number;
   accuracy: number;
-  time_taken_seconds: number;
-  topic_performance: Array<{ topic: string; total: number; correct: number }>;
-  difficulty_analysis: Array<{ difficulty: string; total: number; correct: number }>;
-  weak_areas: Array<{ topic: string; total: number; correct: number }>;
-  strong_areas: Array<{ topic: string; total: number; correct: number }>;
-  suggestions: string[];
-  rank_estimation: string;
-  results: Array<{
-    id: number;
-    number: number;
-    topic: string;
-    difficulty: string;
-    prompt: string;
-    options: string[];
-    user_answer: string;
-    correct_answer: string;
-    is_correct: boolean;
-    explanation: string;
-  }>;
+  elapsedSeconds: number;
+  weakAreas: Array<{ topic: string; total: number; correct: number }>;
+  strongAreas: Array<{ topic: string; total: number; correct: number }>;
+}
+
+interface DsaEvaluation {
+  score: number;
+  feedback: string;
+  covered: string[];
+  missing: string[];
 }
 
 interface Analytics {
@@ -115,7 +96,6 @@ interface Analytics {
   xp: number;
   strong_topics: Array<{ topic: string; answered: number; correct: number }>;
   weak_topics: Array<{ topic: string; answered: number; correct: number }>;
-  progress: Array<{ day: string; xp: number }>;
   leaderboard: Array<{ user_id: string; xp: number; correct: number }>;
 }
 
@@ -123,49 +103,51 @@ const TESTS: TestCard[] = [
   {
     id: "dsa",
     title: "DSA Mock Test",
-    description: "Adaptive coding problem from your weak LeetCode/GFG areas.",
+    description: "One personalized coding problem from weak LeetCode/GFG areas.",
     accent: "from-emerald-500 via-teal-500 to-cyan-500",
     icon: Network,
   },
   {
     id: "aptitude",
     title: "Aptitude Mock Test",
-    description: "Timed quantitative questions with instant explanations.",
+    description: "20 quantitative MCQs with timer and explanations.",
     accent: "from-amber-500 via-orange-500 to-rose-500",
     icon: Gauge,
   },
   {
     id: "verbal",
     title: "Verbal Ability Mock Test",
-    description: "Grammar, vocabulary, comprehension, and sentence logic.",
+    description: "20 grammar, vocabulary, and comprehension MCQs.",
     accent: "from-sky-500 via-blue-500 to-indigo-500",
     icon: BookOpen,
   },
   {
-    id: "logical",
+    id: "reasoning",
     title: "Logical Reasoning Mock Test",
-    description: "Fresh reasoning puzzles that adapt to weak patterns.",
+    description: "20 reasoning puzzles across common interview patterns.",
     accent: "from-fuchsia-500 via-pink-500 to-rose-500",
     icon: BrainCircuit,
   },
   {
     id: "programming",
     title: "Programming Concepts Mock Test",
-    description: "Language-specific MCQs, snippets, debugging, and concepts.",
+    description: "20 language-specific concept, debugging, and tracing questions.",
     accent: "from-violet-500 via-purple-500 to-blue-500",
     icon: Code2,
   },
 ];
 
 const LANGUAGES = ["Python", "JavaScript", "Java", "C++", "C", "Go", "Rust"];
+const ARENA_ORDER: Arena[] = ["dsa", "aptitude", "verbal", "reasoning", "programming"];
 
-function getUserId() {
-  if (typeof window === "undefined") return "default_user";
-  const existing = window.localStorage.getItem("mock_arena_user_id");
-  if (existing) return existing;
-  const created = `arena-${crypto.randomUUID()}`;
-  window.localStorage.setItem("mock_arena_user_id", created);
-  return created;
+function emptyArenaMap<T>(value: T): Record<Arena, T> {
+  return {
+    dsa: value,
+    aptitude: value,
+    verbal: value,
+    reasoning: value,
+    programming: value,
+  };
 }
 
 function formatTime(seconds: number) {
@@ -174,214 +156,219 @@ function formatTime(seconds: number) {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function scoreTwentyQuestionTest(
+  test: TwentyQuestionTest,
+  answers: Record<string, string>,
+  elapsedSeconds: number
+): TestResult {
+  const topicStats: Record<string, { topic: string; total: number; correct: number }> = {};
+  let correct = 0;
+
+  for (const question of test.questions) {
+    const userAnswer = answers[String(question.id)] ?? "";
+    const isCorrect = userAnswer.toUpperCase() === question.correct_answer.toUpperCase();
+    if (isCorrect) correct += 1;
+    topicStats[question.topic] ??= { topic: question.topic, total: 0, correct: 0 };
+    topicStats[question.topic].total += 1;
+    if (isCorrect) topicStats[question.topic].correct += 1;
+  }
+
+  const total = test.questions.length;
+  const topicList = Object.values(topicStats);
+  const byAccuracy = (item: { total: number; correct: number }) => item.correct / Math.max(1, item.total);
+
+  return {
+    score: correct,
+    total,
+    correct,
+    wrong: total - correct,
+    accuracy: total ? Math.round((correct / total) * 1000) / 10 : 0,
+    elapsedSeconds,
+    weakAreas: [...topicList].sort((a, b) => byAccuracy(a) - byAccuracy(b)).slice(0, 3),
+    strongAreas: [...topicList].sort((a, b) => byAccuracy(b) - byAccuracy(a)).slice(0, 3),
+  };
+}
+
+function evaluateDsaAnswer(answer: string): DsaEvaluation {
+  const normalized = answer.toLowerCase();
+  const rubric = [
+    "constraints",
+    "edge cases",
+    "algorithm",
+    "complexity",
+    "data structure",
+    "example",
+  ];
+  const covered = rubric.filter((item) => normalized.includes(item));
+  const missing = rubric.filter((item) => !normalized.includes(item));
+  const wordScore = Math.min(35, Math.floor(answer.trim().split(/\s+/).length / 3));
+  const score = Math.min(100, 25 + covered.length * 8 + wordScore);
+
+  return {
+    score,
+    covered,
+    missing,
+    feedback:
+      score >= 75
+        ? "Strong coding-interview answer. Your response has enough structure and depth to evaluate well."
+        : "Good start. Add constraints, edge cases, complexity, and a clearer algorithm walkthrough.",
+  };
+}
+
 export default function MockTestArena() {
-  const [selectedTest, setSelectedTest] = useState<TestType>("dsa");
+  const [selectedArena, setSelectedArena] = useState<Arena>("dsa");
+  const [arenaTests, setArenaTests] = useState<Record<Arena, ArenaTest | null>>(
+    emptyArenaMap<ArenaTest | null>(null)
+  );
+  const [answers, setAnswers] = useState<Record<Arena, Record<string, string>>>(
+    emptyArenaMap<Record<string, string>>({})
+  );
+  const [activeIndex, setActiveIndex] = useState<Record<Arena, number>>(
+    emptyArenaMap(0)
+  );
+  const [results, setResults] = useState<Record<Arena, TestResult | DsaEvaluation | null>>(
+    emptyArenaMap<TestResult | DsaEvaluation | null>(null)
+  );
+  const [timeLeft, setTimeLeft] = useState<Record<Arena, number>>(emptyArenaMap(0));
+  const [elapsed, setElapsed] = useState<Record<Arena, number>>(emptyArenaMap(0));
   const [leetcodeUsername, setLeetcodeUsername] = useState("");
   const [gfgUsername, setGfgUsername] = useState("");
   const [language, setLanguage] = useState("Python");
-  const [activeAttempt, setActiveAttempt] = useState<ActiveAttempt | null>(null);
-  const [answer, setAnswer] = useState("");
-  const [timeLeft, setTimeLeft] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [loadingArena, setLoadingArena] = useState<Arena | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [darkMode, setDarkMode] = useState(true);
-  const [aptitudeAttempt, setAptitudeAttempt] = useState<AptitudeAttempt | null>(null);
-  const [aptitudeAnswers, setAptitudeAnswers] = useState<Record<string, string>>({});
-  const [aptitudeIndex, setAptitudeIndex] = useState(0);
-  const [aptitudeResult, setAptitudeResult] = useState<AptitudeResult | null>(null);
-  const [aptitudeElapsed, setAptitudeElapsed] = useState(0);
-  const [aptitudeTimeLeft, setAptitudeTimeLeft] = useState(0);
-  const [submittingAptitude, setSubmittingAptitude] = useState(false);
 
-  const userId = useMemo(getUserId, []);
-  const selectedMeta = TESTS.find((test) => test.id === selectedTest) ?? TESTS[0];
+  const { token } = useAuth();
+  const selectedMeta = TESTS.find((test) => test.id === selectedArena) ?? TESTS[0];
+  const selectedTest = arenaTests[selectedArena];
+  const selectedResult = results[selectedArena];
 
   useEffect(() => {
     async function loadAnalytics() {
       try {
-        const res = await fetch(`${API_BASE}/mock-tests/analytics/${userId}`);
-        if (!res.ok) return;
-        setAnalytics(await res.json());
+        if (!token) return;
+        const data = await authFetch<Analytics>(`${API_BASE}/mock-tests/analytics`, token);
+        setAnalytics(data);
       } catch (err) {
         console.error(err);
       }
     }
 
     loadAnalytics();
-  }, [userId]);
+  }, [token]);
 
   useEffect(() => {
-    if (!activeAttempt || evaluation) return;
-    setTimeLeft(activeAttempt.timer_seconds);
-    setElapsed(0);
-  }, [activeAttempt, evaluation]);
-
-  useEffect(() => {
-    if (!activeAttempt || evaluation || timeLeft <= 0) return;
+    if (!selectedTest || selectedResult || timeLeft[selectedArena] <= 0) return;
     const timer = window.setInterval(() => {
-      setTimeLeft((prev) => Math.max(0, prev - 1));
-      setElapsed((prev) => prev + 1);
+      setTimeLeft((prev) => ({
+        ...prev,
+        [selectedArena]: Math.max(0, prev[selectedArena] - 1),
+      }));
+      setElapsed((prev) => ({ ...prev, [selectedArena]: prev[selectedArena] + 1 }));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [activeAttempt, evaluation, timeLeft]);
+  }, [selectedArena, selectedTest, selectedResult, timeLeft]);
 
-  useEffect(() => {
-    if (!aptitudeAttempt || aptitudeResult) return;
-    setAptitudeTimeLeft(aptitudeAttempt.timer_seconds);
-    setAptitudeElapsed(0);
-  }, [aptitudeAttempt, aptitudeResult]);
-
-  useEffect(() => {
-    if (!aptitudeAttempt || aptitudeResult || aptitudeTimeLeft <= 0) return;
-    const timer = window.setInterval(() => {
-      setAptitudeTimeLeft((prev) => Math.max(0, prev - 1));
-      setAptitudeElapsed((prev) => prev + 1);
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [aptitudeAttempt, aptitudeResult, aptitudeTimeLeft]);
-
-  useEffect(() => {
-    if (!aptitudeAttempt) return;
-    window.localStorage.setItem(
-      `aptitude_answers_${aptitudeAttempt.attempt_id}`,
-      JSON.stringify(aptitudeAnswers)
-    );
-  }, [aptitudeAnswers, aptitudeAttempt]);
-
-  async function refreshAnalytics() {
-    const res = await fetch(`${API_BASE}/mock-tests/analytics/${userId}`);
-    if (res.ok) setAnalytics(await res.json());
-  }
-
-  async function startTest(testType = selectedTest) {
-    if (testType === "aptitude") {
-      await generateAptitudeTest();
-      return;
-    }
-
-    setSelectedTest(testType);
-    setLoading(true);
+  async function generateArenaTest(arena: Arena = selectedArena) {
+    setSelectedArena(arena);
+    setLoadingArena(arena);
     setError(null);
-    setEvaluation(null);
-    setAnswer("");
 
     try {
-      const res = await fetch(`${API_BASE}/mock-tests/start`, {
+      if (!token) {
+        throw new Error("Session expired. Please sign in again.");
+      }
+
+      const data = await authFetch<ArenaTest>(`${API_BASE}/mock/${arena}/generate`, token, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: userId,
-          test_type: testType,
           leetcode_username: leetcodeUsername,
           gfg_username: gfgUsername,
           language,
         }),
       });
-
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        throw new Error(detail?.detail ?? "Could not start mock test");
+      if (data.arena !== arena) {
+        throw new Error("Generated test did not match the selected arena");
       }
 
-      setActiveAttempt(await res.json());
+      setArenaTests((prev) => ({ ...prev, [arena]: data }));
+      setAnswers((prev) => ({ ...prev, [arena]: {} }));
+      setActiveIndex((prev) => ({ ...prev, [arena]: 0 }));
+      setResults((prev) => ({ ...prev, [arena]: null }));
+      setTimeLeft((prev) => ({ ...prev, [arena]: data.timer_seconds }));
+      setElapsed((prev) => ({ ...prev, [arena]: 0 }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start mock test");
+      setError(err instanceof Error ? err.message : "Could not generate test");
     } finally {
-      setLoading(false);
+      setLoadingArena(null);
     }
   }
 
-  async function generateAptitudeTest() {
-    setSelectedTest("aptitude");
-    setLoading(true);
-    setError(null);
-    setAptitudeResult(null);
-    setAptitudeAnswers({});
-    setAptitudeIndex(0);
-    setActiveAttempt(null);
-    setEvaluation(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/aptitude-tests/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId }),
-      });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        throw new Error(detail?.detail ?? "Could not generate aptitude test");
-      }
-      const data = await res.json();
-      setAptitudeAttempt(data);
-      const saved = window.localStorage.getItem(`aptitude_answers_${data.attempt_id}`);
-      setAptitudeAnswers(saved ? JSON.parse(saved) : {});
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not generate aptitude test");
-    } finally {
-      setLoading(false);
-    }
+  function submitTwentyQuestionTest(test: TwentyQuestionTest) {
+    const result = scoreTwentyQuestionTest(test, answers[test.arena], elapsed[test.arena]);
+    setResults((prev) => ({ ...prev, [test.arena]: result }));
   }
 
-  async function submitAptitudeTest() {
-    if (!aptitudeAttempt) return;
-    setSubmittingAptitude(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API_BASE}/aptitude-tests/submit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attempt_id: aptitudeAttempt.attempt_id,
-          answers: aptitudeAnswers,
-          time_spent_seconds: aptitudeElapsed,
-        }),
-      });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        throw new Error(detail?.detail ?? "Could not submit aptitude test");
-      }
-      setAptitudeResult(await res.json());
-      window.localStorage.removeItem(`aptitude_answers_${aptitudeAttempt.attempt_id}`);
-      await refreshAnalytics();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not submit aptitude test");
-    } finally {
-      setSubmittingAptitude(false);
-    }
+  function submitDsaAnswer(test: DsaTest) {
+    const answer = answers.dsa[String(test.question.id)] ?? "";
+    if (!answer.trim()) return;
+    setResults((prev) => ({ ...prev, dsa: evaluateDsaAnswer(answer) }));
   }
 
-  async function submitAnswer() {
-    if (!activeAttempt || !answer.trim()) return;
-    setSubmitting(true);
+  function selectArena(arena: Arena) {
+    setSelectedArena(arena);
     setError(null);
+  }
 
-    try {
-      const res = await fetch(`${API_BASE}/mock-tests/submit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question_id: activeAttempt.question.id,
-          answer,
-          time_spent_seconds: elapsed,
-        }),
-      });
+  function renderSelectedArena() {
+    if (!selectedTest) return null;
+    if (selectedTest.arena !== selectedArena) return null;
 
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        throw new Error(detail?.detail ?? "Could not submit answer");
-      }
-
-      setEvaluation(await res.json());
-      await refreshAnalytics();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not submit answer");
-    } finally {
-      setSubmitting(false);
+    if (selectedTest.arena === "dsa") {
+      return (
+        <DSAMockTest
+          selectedArena={selectedArena}
+          test={selectedTest}
+          answer={answers.dsa[String(selectedTest.question.id)] ?? ""}
+          onAnswer={(value) =>
+            setAnswers((prev) => ({
+              ...prev,
+              dsa: { ...prev.dsa, [String(selectedTest.question.id)]: value },
+            }))
+          }
+          timeLeft={timeLeft.dsa}
+          result={results.dsa as DsaEvaluation | null}
+          onSubmit={() => submitDsaAnswer(selectedTest)}
+          onRegenerate={() => generateArenaTest("dsa")}
+        />
+      );
     }
+
+    return (
+      <TwentyQuestionMockTest
+        selectedArena={selectedArena}
+        test={selectedTest}
+        answers={answers[selectedTest.arena]}
+        activeIndex={activeIndex[selectedTest.arena]}
+        timeLeft={timeLeft[selectedTest.arena]}
+        result={results[selectedTest.arena] as TestResult | null}
+        onAnswer={(questionId, value) =>
+          setAnswers((prev) => ({
+            ...prev,
+            [selectedTest.arena]: {
+              ...prev[selectedTest.arena],
+              [String(questionId)]: value,
+            },
+          }))
+        }
+        onIndexChange={(index) =>
+          setActiveIndex((prev) => ({ ...prev, [selectedTest.arena]: index }))
+        }
+        onSubmit={() => submitTwentyQuestionTest(selectedTest)}
+        onRegenerate={() => generateArenaTest(selectedTest.arena)}
+      />
+    );
   }
 
   return (
@@ -413,12 +400,12 @@ export default function MockTestArena() {
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {TESTS.map((test) => {
                 const Icon = test.icon;
-                const isSelected = selectedTest === test.id;
+                const isSelected = selectedArena === test.id;
                 return (
                   <button
                     key={test.id}
                     type="button"
-                    onClick={() => setSelectedTest(test.id)}
+                    onClick={() => selectArena(test.id)}
                     className={`group overflow-hidden rounded-2xl border text-left shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-xl ${
                       isSelected
                         ? "border-blue-500 bg-white dark:border-blue-400 dark:bg-zinc-900"
@@ -436,11 +423,11 @@ export default function MockTestArena() {
                       </p>
                       <div className="mt-5 flex items-center justify-between">
                         <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">
-                          Adaptive AI
+                          {test.id === "dsa" ? "1 coding problem" : "20 MCQs"}
                         </span>
                         <span className="inline-flex items-center gap-2 rounded-full bg-slate-950 px-3 py-2 text-xs font-medium text-white transition group-hover:bg-blue-600 dark:bg-zinc-100 dark:text-zinc-950">
                           <Play className="h-3.5 w-3.5" />
-                          Start Test
+                          Select
                         </span>
                       </div>
                     </div>
@@ -457,51 +444,39 @@ export default function MockTestArena() {
                   </p>
                   <h2 className="mt-1 text-xl font-semibold">{selectedMeta.title}</h2>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600 dark:text-zinc-400">
-                    Questions are generated uniquely per attempt and avoid recently asked prompts where possible.
+                    Each arena has isolated state. Switching arenas hides previous test content completely.
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => startTest(selectedTest)}
-                  disabled={loading}
+                  onClick={() => generateArenaTest(selectedArena)}
+                  disabled={loadingArena === selectedArena}
                   className={`inline-flex h-11 items-center gap-2 rounded-full bg-gradient-to-r ${selectedMeta.accent} px-5 text-sm font-semibold text-white shadow-lg transition hover:scale-[1.02] disabled:opacity-60`}
                 >
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {loadingArena === selectedArena ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-4 w-4" />
+                  )}
                   Generate Test
                 </button>
               </div>
 
-              {selectedTest === "dsa" || selectedTest === "programming" ? (
-                <div className={`mt-5 grid gap-4 ${selectedTest === "dsa" ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
-                  {selectedTest === "dsa" ? (
+              {selectedArena === "dsa" || selectedArena === "programming" ? (
+                <div className={`mt-5 grid gap-4 ${selectedArena === "dsa" ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
+                  {selectedArena === "dsa" ? (
                     <>
-                      <label className="text-sm">
-                        <span className="mb-2 block font-medium">LeetCode username</span>
-                        <input
-                          value={leetcodeUsername}
-                          onChange={(e) => setLeetcodeUsername(e.target.value)}
-                          placeholder="optional"
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
-                        />
-                      </label>
-                      <label className="text-sm">
-                        <span className="mb-2 block font-medium">GeeksforGeeks username</span>
-                        <input
-                          value={gfgUsername}
-                          onChange={(e) => setGfgUsername(e.target.value)}
-                          placeholder="optional"
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
-                        />
-                      </label>
+                      <InputField label="LeetCode username" value={leetcodeUsername} onChange={setLeetcodeUsername} />
+                      <InputField label="GeeksforGeeks username" value={gfgUsername} onChange={setGfgUsername} />
                     </>
                   ) : null}
 
-                  {selectedTest === "programming" ? (
+                  {selectedArena === "programming" ? (
                     <label className="text-sm md:col-span-1">
                       <span className="mb-2 block font-medium">Programming language</span>
                       <select
                         value={language}
-                        onChange={(e) => setLanguage(e.target.value)}
+                        onChange={(event) => setLanguage(event.target.value)}
                         className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
                       >
                         {LANGUAGES.map((item) => (
@@ -520,355 +495,474 @@ export default function MockTestArena() {
               ) : null}
             </div>
 
-            {aptitudeAttempt && !aptitudeResult ? (
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500 dark:text-zinc-500">
-                      Full Aptitude Mock Test
-                    </p>
-                    <h2 className="mt-1 text-xl font-semibold">
-                      Question {aptitudeIndex + 1} of {aptitudeAttempt.questions.length}
-                    </h2>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm font-medium dark:bg-zinc-800">
-                      <Timer className="h-4 w-4" />
-                      {formatTime(aptitudeTimeLeft)}
-                    </span>
-                    <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-                      {Object.keys(aptitudeAnswers).length}/{aptitudeAttempt.questions.length} answered
-                    </span>
-                  </div>
-                </div>
-
-                <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-zinc-800">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-amber-500 to-rose-500 transition-all"
-                    style={{
-                      width: `${(Object.keys(aptitudeAnswers).length / aptitudeAttempt.questions.length) * 100}%`,
-                    }}
-                  />
-                </div>
-
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {aptitudeAttempt.questions.map((question, index) => (
-                    <button
-                      key={question.id}
-                      type="button"
-                      onClick={() => setAptitudeIndex(index)}
-                      className={`h-9 w-9 rounded-full text-sm font-semibold transition ${
-                        aptitudeIndex === index
-                          ? "bg-blue-600 text-white"
-                          : aptitudeAnswers[String(question.id)]
-                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                            : "bg-slate-100 text-slate-600 dark:bg-zinc-800 dark:text-zinc-300"
-                      }`}
-                    >
-                      {index + 1}
-                    </button>
-                  ))}
-                </div>
-
-                {(() => {
-                  const question = aptitudeAttempt.questions[aptitudeIndex];
-                  return (
-                    <div className="mt-6 rounded-2xl border border-slate-200 p-5 dark:border-zinc-800">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">
-                          {question.topic}
-                        </span>
-                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 dark:bg-zinc-800 dark:text-zinc-300">
-                          {question.difficulty}
-                        </span>
-                      </div>
-                      <p className="mt-4 text-base font-medium leading-7">
-                        {question.prompt}
-                      </p>
-                      <div className="mt-5 grid gap-3 md:grid-cols-2">
-                        {question.options.map((option) => {
-                          const value = option.slice(0, 1);
-                          const checked = aptitudeAnswers[String(question.id)] === value;
-                          return (
-                            <label
-                              key={option}
-                              className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${
-                                checked
-                                  ? "border-blue-500 bg-blue-50 dark:bg-blue-950/40"
-                                  : "border-slate-200 hover:bg-slate-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
-                              }`}
-                            >
-                              <input
-                                type="radio"
-                                name={`aptitude-${question.id}`}
-                                checked={checked}
-                                onChange={() =>
-                                  setAptitudeAnswers((prev) => ({
-                                    ...prev,
-                                    [String(question.id)]: value,
-                                  }))
-                                }
-                              />
-                              <span>{option}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAptitudeIndex((prev) => Math.max(0, prev - 1))}
-                      disabled={aptitudeIndex === 0}
-                      className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium disabled:opacity-50 dark:border-zinc-700"
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setAptitudeIndex((prev) =>
-                          Math.min(aptitudeAttempt.questions.length - 1, prev + 1)
-                        )
-                      }
-                      disabled={aptitudeIndex === aptitudeAttempt.questions.length - 1}
-                      className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium disabled:opacity-50 dark:border-zinc-700"
-                    >
-                      Next
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={submitAptitudeTest}
-                    disabled={submittingAptitude}
-                    className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950"
-                  >
-                    {submittingAptitude ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                    Submit Test
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {aptitudeResult ? (
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-emerald-600 dark:text-emerald-400">
-                      Aptitude Result
-                    </p>
-                    <h2 className="mt-1 text-2xl font-semibold">
-                      {aptitudeResult.score}/{aptitudeResult.total} Score
-                    </h2>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-zinc-400">
-                      Rank estimation: {aptitudeResult.rank_estimation}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={generateAptitudeTest}
-                    className="rounded-full bg-blue-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
-                  >
-                    Retake Fresh Test
-                  </button>
-                </div>
-
-                <div className="mt-5 grid gap-3 md:grid-cols-4">
-                  <Metric icon={Award} label="Accuracy" value={`${aptitudeResult.accuracy}%`} />
-                  <Metric icon={CheckCircle2} label="Correct" value={`${aptitudeResult.correct}`} />
-                  <Metric icon={XCircle} label="Wrong" value={`${aptitudeResult.wrong}`} />
-                  <Metric icon={Timer} label="Time" value={formatTime(aptitudeResult.time_taken_seconds)} />
-                </div>
-
-                <div className="mt-6 grid gap-4 md:grid-cols-2">
-                  <ResultPanel title="Strong Areas" items={aptitudeResult.strong_areas} />
-                  <ResultPanel title="Weak Areas" items={aptitudeResult.weak_areas} />
-                </div>
-
-                <div className="mt-6 rounded-2xl bg-slate-50 p-4 dark:bg-zinc-950">
-                  <h3 className="font-semibold">Improvement Suggestions</h3>
-                  <ul className="mt-3 space-y-2 text-sm text-slate-700 dark:text-zinc-300">
-                    {aptitudeResult.suggestions.map((item) => (
-                      <li key={item}>- {item}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="mt-6 space-y-3">
-                  <h3 className="font-semibold">Answer Review</h3>
-                  {aptitudeResult.results.map((item) => (
-                    <div
-                      key={item.id}
-                      className="rounded-2xl border border-slate-200 p-4 dark:border-zinc-800"
-                    >
-                      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
-                        <span>Q{item.number}</span>
-                        <span className="rounded-full bg-slate-100 px-2 py-1 dark:bg-zinc-800">{item.topic}</span>
-                        <span className={item.is_correct ? "text-emerald-500" : "text-rose-500"}>
-                          {item.is_correct ? "Correct" : "Wrong"}
-                        </span>
-                      </div>
-                      <p className="mt-3 text-sm font-medium">{item.prompt}</p>
-                      <p className="mt-2 text-sm text-slate-600 dark:text-zinc-400">
-                        Your answer: {item.user_answer || "Not answered"} | Correct answer: {item.correct_answer}
-                      </p>
-                      <p className="mt-2 text-sm text-slate-700 dark:text-zinc-300">
-                        {item.explanation}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {activeAttempt ? (
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500 dark:text-zinc-500">
-                      {activeAttempt.title}
-                    </p>
-                    <h2 className="mt-1 text-xl font-semibold">
-                      {activeAttempt.question.topic}
-                    </h2>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">
-                      {activeAttempt.question.difficulty}
-                    </span>
-                    <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm font-medium dark:bg-zinc-800">
-                      <Timer className="h-4 w-4" />
-                      {formatTime(timeLeft)}
-                    </span>
-                  </div>
-                </div>
-
-                <pre className="mt-5 whitespace-pre-wrap rounded-2xl bg-slate-950 p-5 text-sm leading-6 text-slate-50 dark:bg-black">
-                  {activeAttempt.question.prompt}
-                </pre>
-
-                {activeAttempt.question.options.length > 0 ? (
-                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                    {activeAttempt.question.options.map((option) => (
-                      <button
-                        key={option}
-                        type="button"
-                        onClick={() => setAnswer(option.slice(0, 1))}
-                        className={`rounded-xl border px-4 py-3 text-left text-sm transition ${
-                          answer === option.slice(0, 1)
-                            ? "border-blue-500 bg-blue-50 dark:bg-blue-950/40"
-                            : "border-slate-200 hover:bg-slate-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-                        }`}
-                      >
-                        {option}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <textarea
-                    value={answer}
-                    onChange={(e) => setAnswer(e.target.value)}
-                    rows={7}
-                    placeholder="Write your approach, answer, complexity, edge cases, or explanation..."
-                    className="mt-4 w-full resize-none rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
-                  />
-                )}
-
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                  <button
-                    type="button"
-                    onClick={submitAnswer}
-                    disabled={submitting || !answer.trim() || !!evaluation}
-                    className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950"
-                  >
-                    {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                    Submit Answer
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => startTest(activeAttempt.test_type)}
-                    className="text-sm font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
-                  >
-                    Generate another unique question
-                  </button>
-                </div>
-
-                {evaluation ? (
-                  <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-950">
-                    <div className="flex items-center gap-3">
-                      {evaluation.is_correct ? (
-                        <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                      ) : (
-                        <XCircle className="h-5 w-5 text-rose-500" />
-                      )}
-                      <h3 className="font-semibold">
-                        {evaluation.is_correct ? "Correct" : "Needs Improvement"} - +{evaluation.xp} XP
-                      </h3>
-                    </div>
-                    <p className="mt-3 text-sm leading-6 text-slate-700 dark:text-zinc-300">
-                      {evaluation.feedback}
-                    </p>
-                    <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-zinc-400">
-                      <strong>Explanation:</strong> {evaluation.explanation}
-                    </p>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
+            {renderSelectedArena()}
           </section>
 
           <aside className="space-y-4">
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-              <h2 className="flex items-center gap-2 font-semibold">
-                <BarChart3 className="h-5 w-5 text-blue-500" />
-                Performance Analytics
-              </h2>
-              <div className="mt-4 grid grid-cols-2 gap-3">
-                <Metric icon={Award} label="Accuracy" value={`${analytics?.accuracy ?? 0}%`} />
-                <Metric icon={Timer} label="Avg Speed" value={`${analytics?.avg_time ?? 0}s`} />
-                <Metric icon={Flame} label="Streak" value={`${analytics?.streak ?? 0}d`} />
-                <Metric icon={Sparkles} label="XP" value={`${analytics?.xp ?? 0}`} />
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-              <h2 className="flex items-center gap-2 font-semibold">
-                <GraduationCap className="h-5 w-5 text-emerald-500" />
-                Topic Signals
-              </h2>
-              <TopicList title="Strong" topics={analytics?.strong_topics ?? []} />
-              <TopicList title="Weak" topics={analytics?.weak_topics ?? []} />
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-              <h2 className="flex items-center gap-2 font-semibold">
-                <Trophy className="h-5 w-5 text-amber-500" />
-                Leaderboard
-              </h2>
-              <div className="mt-4 space-y-2">
-                {(analytics?.leaderboard ?? []).length === 0 ? (
-                  <p className="text-sm text-slate-500 dark:text-zinc-400">No attempts yet.</p>
-                ) : (
-                  analytics?.leaderboard.map((row, index) => (
-                    <div
-                      key={row.user_id}
-                      className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm dark:bg-zinc-950"
-                    >
-                      <span className="truncate">#{index + 1} {row.user_id}</span>
-                      <span className="font-semibold">{row.xp} XP</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+            <AnalyticsPanel analytics={analytics} />
+            <ArenaStatePanel arenaTests={arenaTests} />
           </aside>
         </div>
       </div>
     </main>
+  );
+}
+
+function InputField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="text-sm">
+      <span className="mb-2 block font-medium">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="optional"
+        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
+      />
+    </label>
+  );
+}
+
+function AptitudeMockTest(props: TwentyQuestionProps) {
+  return <TwentyQuestionMockTest {...props} />;
+}
+
+function VerbalMockTest(props: TwentyQuestionProps) {
+  return <TwentyQuestionMockTest {...props} />;
+}
+
+function ReasoningMockTest(props: TwentyQuestionProps) {
+  return <TwentyQuestionMockTest {...props} />;
+}
+
+function ProgrammingConceptMockTest(props: TwentyQuestionProps) {
+  return <TwentyQuestionMockTest {...props} />;
+}
+
+interface TwentyQuestionProps {
+  selectedArena: Arena;
+  test: TwentyQuestionTest;
+  answers: Record<string, string>;
+  activeIndex: number;
+  timeLeft: number;
+  result: TestResult | null;
+  onAnswer: (questionId: number, value: string) => void;
+  onIndexChange: (index: number) => void;
+  onSubmit: () => void;
+  onRegenerate: () => void;
+}
+
+function TwentyQuestionMockTest(props: TwentyQuestionProps) {
+  const { selectedArena, test } = props;
+  if (test.arena !== selectedArena) return null;
+
+  if (test.arena === "aptitude") return <AptitudeTestContent {...props} />;
+  if (test.arena === "verbal") return <VerbalTestContent {...props} />;
+  if (test.arena === "reasoning") return <ReasoningTestContent {...props} />;
+  return <ProgrammingTestContent {...props} />;
+}
+
+function AptitudeTestContent(props: TwentyQuestionProps) {
+  return <TwentyQuestionContent {...props} />;
+}
+
+function VerbalTestContent(props: TwentyQuestionProps) {
+  return <TwentyQuestionContent {...props} />;
+}
+
+function ReasoningTestContent(props: TwentyQuestionProps) {
+  return <TwentyQuestionContent {...props} />;
+}
+
+function ProgrammingTestContent(props: TwentyQuestionProps) {
+  return <TwentyQuestionContent {...props} />;
+}
+
+function TwentyQuestionContent({
+  test,
+  answers,
+  activeIndex,
+  timeLeft,
+  result,
+  onAnswer,
+  onIndexChange,
+  onSubmit,
+  onRegenerate,
+}: TwentyQuestionProps) {
+  const question = test.questions[activeIndex] ?? test.questions[0];
+  const answeredCount = Object.keys(answers).length;
+
+  if (result) {
+    return (
+      <ResultView
+        title={test.title}
+        result={result}
+        questions={test.questions}
+        answers={answers}
+        onRegenerate={onRegenerate}
+      />
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase text-slate-500 dark:text-zinc-500">
+            {test.title}
+          </p>
+          <h2 className="mt-1 text-xl font-semibold">
+            Question {activeIndex + 1} of {test.questions.length}
+          </h2>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm font-medium dark:bg-zinc-800">
+            <Timer className="h-4 w-4" />
+            {formatTime(timeLeft)}
+          </span>
+          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+            {answeredCount}/{test.questions.length} answered
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-zinc-800">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all"
+          style={{ width: `${(answeredCount / test.questions.length) * 100}%` }}
+        />
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        {test.questions.map((item, index) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onIndexChange(index)}
+            className={`h-9 w-9 rounded-full text-sm font-semibold transition ${
+              activeIndex === index
+                ? "bg-blue-600 text-white"
+                : answers[String(item.id)]
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                  : "bg-slate-100 text-slate-600 dark:bg-zinc-800 dark:text-zinc-300"
+            }`}
+          >
+            {index + 1}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-6 rounded-2xl border border-slate-200 p-5 dark:border-zinc-800">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">
+            {question.topic}
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 dark:bg-zinc-800 dark:text-zinc-300">
+            {question.difficulty}
+          </span>
+        </div>
+        <p className="mt-4 whitespace-pre-wrap text-base font-medium leading-7">
+          {question.prompt}
+        </p>
+        <div className="mt-5 grid gap-3 md:grid-cols-2">
+          {question.options.map((option) => {
+            const value = option.slice(0, 1);
+            const checked = answers[String(question.id)] === value;
+            return (
+              <label
+                key={option}
+                className={`flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${
+                  checked
+                    ? "border-blue-500 bg-blue-50 dark:bg-blue-950/40"
+                    : "border-slate-200 hover:bg-slate-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name={`${test.arena}-${question.id}`}
+                  checked={checked}
+                  onChange={() => onAnswer(question.id, value)}
+                />
+                <span>{option}</span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onIndexChange(Math.max(0, activeIndex - 1))}
+            disabled={activeIndex === 0}
+            className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium disabled:opacity-50 dark:border-zinc-700"
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            onClick={() => onIndexChange(Math.min(test.questions.length - 1, activeIndex + 1))}
+            disabled={activeIndex === test.questions.length - 1}
+            className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium disabled:opacity-50 dark:border-zinc-700"
+          >
+            Next
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={onSubmit}
+          className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 dark:bg-zinc-100 dark:text-zinc-950"
+        >
+          <CheckCircle2 className="h-4 w-4" />
+          Submit Test
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DSAMockTest({
+  selectedArena,
+  test,
+  answer,
+  onAnswer,
+  timeLeft,
+  result,
+  onSubmit,
+  onRegenerate,
+}: {
+  selectedArena: Arena;
+  test: DsaTest;
+  answer: string;
+  onAnswer: (value: string) => void;
+  timeLeft: number;
+  result: DsaEvaluation | null;
+  onSubmit: () => void;
+  onRegenerate: () => void;
+}) {
+  if (test.arena !== selectedArena) return null;
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase text-slate-500 dark:text-zinc-500">
+            {test.title}
+          </p>
+          <h2 className="mt-1 text-xl font-semibold">{test.question.topic}</h2>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:bg-blue-950/50 dark:text-blue-300">
+            {test.question.difficulty}
+          </span>
+          <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm font-medium dark:bg-zinc-800">
+            <Timer className="h-4 w-4" />
+            {formatTime(timeLeft)}
+          </span>
+        </div>
+      </div>
+
+      <pre className="mt-5 whitespace-pre-wrap rounded-2xl bg-slate-950 p-5 text-sm leading-6 text-slate-50 dark:bg-black">
+        {test.question.prompt}
+      </pre>
+
+      <textarea
+        value={answer}
+        onChange={(event) => onAnswer(event.target.value)}
+        rows={8}
+        placeholder="Write your approach, edge cases, complexity, and implementation plan..."
+        className="mt-4 w-full resize-none rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
+      />
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={!answer.trim()}
+          className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950"
+        >
+          <CheckCircle2 className="h-4 w-4" />
+          Submit Answer
+        </button>
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="text-sm font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
+        >
+          Generate another DSA problem
+        </button>
+      </div>
+
+      {result ? (
+        <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-950">
+          <h3 className="font-semibold">Interview Score: {result.score}/100</h3>
+          <p className="mt-3 text-sm leading-6 text-slate-700 dark:text-zinc-300">
+            {result.feedback}
+          </p>
+          <p className="mt-3 text-sm text-slate-600 dark:text-zinc-400">
+            Expected rubric: {test.question.correct_answer}
+          </p>
+          <p className="mt-2 text-sm text-slate-600 dark:text-zinc-400">
+            Explanation: {test.question.explanation}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ResultView({
+  title,
+  result,
+  questions,
+  answers,
+  onRegenerate,
+}: {
+  title: string;
+  result: TestResult;
+  questions: MockQuestion[];
+  answers: Record<string, string>;
+  onRegenerate: () => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase text-emerald-600 dark:text-emerald-400">
+            {title} Result
+          </p>
+          <h2 className="mt-1 text-2xl font-semibold">
+            {result.score}/{result.total} Score
+          </h2>
+        </div>
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="rounded-full bg-blue-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
+        >
+          Retake Fresh Test
+        </button>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        <Metric icon={Award} label="Accuracy" value={`${result.accuracy}%`} />
+        <Metric icon={CheckCircle2} label="Correct" value={`${result.correct}`} />
+        <Metric icon={XCircle} label="Wrong" value={`${result.wrong}`} />
+        <Metric icon={Timer} label="Time" value={formatTime(result.elapsedSeconds)} />
+      </div>
+
+      <div className="mt-6 grid gap-4 md:grid-cols-2">
+        <ResultPanel title="Strong Areas" items={result.strongAreas} />
+        <ResultPanel title="Weak Areas" items={result.weakAreas} />
+      </div>
+
+      <div className="mt-6 space-y-3">
+        <h3 className="font-semibold">Answer Review</h3>
+        {questions.map((item) => {
+          const userAnswer = answers[String(item.id)] ?? "";
+          const isCorrect = userAnswer === item.correct_answer;
+          return (
+            <div key={item.id} className="rounded-2xl border border-slate-200 p-4 dark:border-zinc-800">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                <span>Q{item.number}</span>
+                <span className="rounded-full bg-slate-100 px-2 py-1 dark:bg-zinc-800">
+                  {item.topic}
+                </span>
+                <span className={isCorrect ? "text-emerald-500" : "text-rose-500"}>
+                  {isCorrect ? "Correct" : "Wrong"}
+                </span>
+              </div>
+              <p className="mt-3 whitespace-pre-wrap text-sm font-medium">{item.prompt}</p>
+              <p className="mt-2 text-sm text-slate-600 dark:text-zinc-400">
+                Your answer: {userAnswer || "Not answered"} | Correct answer: {item.correct_answer}
+              </p>
+              <p className="mt-2 text-sm text-slate-700 dark:text-zinc-300">
+                {item.explanation}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AnalyticsPanel({ analytics }: { analytics: Analytics | null }) {
+  return (
+    <>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="flex items-center gap-2 font-semibold">
+          <BarChart3 className="h-5 w-5 text-blue-500" />
+          Performance Analytics
+        </h2>
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <Metric icon={Award} label="Accuracy" value={`${analytics?.accuracy ?? 0}%`} />
+          <Metric icon={Timer} label="Avg Speed" value={`${analytics?.avg_time ?? 0}s`} />
+          <Metric icon={Flame} label="Streak" value={`${analytics?.streak ?? 0}d`} />
+          <Metric icon={Sparkles} label="XP" value={`${analytics?.xp ?? 0}`} />
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="flex items-center gap-2 font-semibold">
+          <GraduationCap className="h-5 w-5 text-emerald-500" />
+          Topic Signals
+        </h2>
+        <TopicList title="Strong" topics={analytics?.strong_topics ?? []} />
+        <TopicList title="Weak" topics={analytics?.weak_topics ?? []} />
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="flex items-center gap-2 font-semibold">
+          <Trophy className="h-5 w-5 text-amber-500" />
+          Leaderboard
+        </h2>
+        <div className="mt-4 space-y-2">
+          {(analytics?.leaderboard ?? []).length === 0 ? (
+            <p className="text-sm text-slate-500 dark:text-zinc-400">No attempts yet.</p>
+          ) : (
+            analytics?.leaderboard.map((row, index) => (
+              <div
+                key={row.user_id}
+                className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm dark:bg-zinc-950"
+              >
+                <span className="truncate">#{index + 1} {row.user_id}</span>
+                <span className="font-semibold">{row.xp} XP</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ArenaStatePanel({ arenaTests }: { arenaTests: Record<Arena, ArenaTest | null> }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <h2 className="font-semibold">Generated Arenas</h2>
+      <div className="mt-4 space-y-2">
+        {ARENA_ORDER.map((arena) => (
+          <div
+            key={arena}
+            className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm dark:bg-zinc-950"
+          >
+            <span className="capitalize">{arena === "reasoning" ? "logical reasoning" : arena}</span>
+            <span className={arenaTests[arena] ? "text-emerald-500" : "text-slate-400"}>
+              {arenaTests[arena] ? "Ready" : "Empty"}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

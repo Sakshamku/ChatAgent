@@ -8,12 +8,23 @@ import threading
 from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Form, File, UploadFile, Query
+from fastapi import Depends, FastAPI, HTTPException, Form, File, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, AIMessageChunk
 
-from Backend import (
+from backend.auth import (
+    AuthResponse,
+    LoginRequest,
+    SignupRequest,
+    UserRead,
+    authenticate_user,
+    create_access_token,
+    create_user,
+    get_current_user,
+    get_db,
+)
+from backend.Backend import (
     chatbot,
     ingest_pdf,
     get_all_conversations_with_metadata,
@@ -21,11 +32,12 @@ from Backend import (
     search_conversations,
     thread_document_metadata,
 )
-from coding_platforms.gfg import fetch_gfg_profile
-from coding_platforms.leetcode import fetch_leetcode_contests, fetch_leetcode_profile, fetch_leetcode_topics
-from database import (
+from backend.coding_platforms.gfg import fetch_gfg_profile
+from backend.coding_platforms.leetcode import fetch_leetcode_contests, fetch_leetcode_profile, fetch_leetcode_topics
+from backend.database import (
     create_conversation,
     create_mock_test_attempt,
+    get_conversation_title,
     get_mock_test_analytics,
     get_mock_test_attempt,
     get_mock_test_attempt_questions,
@@ -41,8 +53,8 @@ from database import (
     save_topic_stats,
     update_conversation_title,
 )
-from code_interpreter import list_workspace_files
-from utils import generate_thread_id, generate_chat_title
+from backend.code_interpreter import list_workspace_files
+from backend.utils import generate_thread_id, generate_chat_title
 
 app = FastAPI()
 
@@ -406,6 +418,134 @@ def _generate_aptitude_test_questions(user_id: str, recent_prompts: list[str]) -
     return questions
 
 
+TWENTY_QUESTION_TOPICS = {
+    "verbal": [
+        "Grammar",
+        "Sentence Improvement",
+        "Synonyms",
+        "Antonyms",
+        "Reading Comprehension",
+        "Vocabulary",
+        "Fill in the Blanks",
+        "Para Jumbles",
+    ],
+    "reasoning": [
+        "Coding-Decoding",
+        "Blood Relations",
+        "Seating Arrangement",
+        "Syllogism",
+        "Puzzle",
+        "Direction Sense",
+        "Analogy",
+        "Statement & Conclusion",
+    ],
+    "programming": [
+        "OOP",
+        "DBMS",
+        "Operating System",
+        "Computer Networks",
+        "Memory Management",
+        "Exception Handling",
+        "Multithreading",
+        "Language-specific Concepts",
+        "Output Prediction",
+        "Debugging",
+        "Code Tracing",
+    ],
+}
+
+
+def _generic_mcq_template(arena: str, topic: str, index: int, seed: str, language: str = "Python") -> dict:
+    rng = random.Random(int(hashlib.sha256(f"{seed}|{arena}|{topic}|{index}".encode("utf-8")).hexdigest(), 16))
+    difficulty = APTITUDE_DIFFICULTIES[(index - 1) % len(APTITUDE_DIFFICULTIES)]
+
+    if arena == "verbal":
+        templates = {
+            "Grammar": ("Choose the grammatically correct sentence.", "She has completed the assignment.", ["She have completed the assignment.", "She completed has the assignment.", "She have complete the assignment."], "Use 'has' with third-person singular and the past participle 'completed'."),
+            "Sentence Improvement": ("Improve: 'Despite of the rain, they continued playing.'", "Despite the rain, they continued playing.", ["Despite for the rain, they continued playing.", "Although of the rain, they continued playing.", "In spite the rain, they continued playing."], "'Despite' is not followed by 'of'."),
+            "Synonyms": ("Choose the closest synonym of 'meticulous'.", "Careful", ["Careless", "Rapid", "Ordinary"], "'Meticulous' means very careful and precise."),
+            "Antonyms": ("Choose the antonym of 'scarce'.", "Abundant", ["Rare", "Limited", "Insufficient"], "'Scarce' means not enough; the opposite is abundant."),
+            "Reading Comprehension": ("A passage says a team reduced latency by caching repeated requests. What was the main benefit?", "Faster repeated responses", ["Higher disk usage", "More manual testing", "Lower code readability"], "Caching commonly improves response time for repeated requests."),
+            "Vocabulary": ("Choose the word that best means 'to make less severe'.", "Mitigate", ["Magnify", "Ignore", "Repeat"], "To mitigate is to reduce severity or impact."),
+            "Fill in the Blanks": ("The manager asked the team to _____ the report before Friday.", "submit", ["submits", "submitted", "submitting"], "The infinitive phrase 'to submit' takes the base verb."),
+            "Para Jumbles": ("Which sentence should usually come first in a paragraph?", "The sentence that introduces the main idea", ["The sentence with a conclusion marker", "A sentence using 'therefore'", "A sentence referring to 'this issue' without context"], "A paragraph usually begins by introducing its subject."),
+        }
+    elif arena == "reasoning":
+        templates = {
+            "Coding-Decoding": ("If CAT is coded as DBU, how is DOG coded?", "EPH", ["CNG", "FQI", "EPG"], "Each letter is shifted forward by one."),
+            "Blood Relations": ("A is B's brother. B is C's mother. How is A related to C?", "Maternal uncle", ["Father", "Brother", "Grandfather"], "Mother's brother is maternal uncle."),
+            "Seating Arrangement": ("Five people sit in a row. A is left of B and C is right of B. Who is in the middle in A-B-C order?", "B", ["A", "C", "Cannot be determined"], "The order A, B, C places B between A and C."),
+            "Syllogism": ("All roses are flowers. Some flowers fade quickly. Which conclusion definitely follows?", "All roses are flowers", ["All flowers are roses", "Some roses fade quickly", "No roses fade"], "Only the first statement is guaranteed."),
+            "Puzzle": ("If today is Tuesday, what day will it be after 10 days?", "Friday", ["Thursday", "Saturday", "Sunday"], "10 mod 7 is 3; Tuesday plus 3 days is Friday."),
+            "Direction Sense": ("A person walks north, turns right, then turns right again. Which direction is faced?", "South", ["North", "East", "West"], "North -> right is east; right again is south."),
+            "Analogy": ("Book is to Reading as Fork is to ____.", "Eating", ["Writing", "Sleeping", "Drawing"], "A fork is primarily used for eating."),
+            "Statement & Conclusion": ("Statement: Practice improves speed. Conclusion: Regular practice can improve test speed.", "Conclusion follows", ["Conclusion does not follow", "Contradiction", "Unrelated"], "The conclusion restates the statement in practical terms."),
+        }
+    else:
+        code_prompt = {
+            "Python": "What is printed by len({1, 1, 2})?",
+            "JavaScript": "What is the value of typeof []?",
+            "Java": "Which keyword creates a subclass relationship?",
+            "C++": "Which feature supports runtime polymorphism?",
+            "C": "Which function allocates memory dynamically?",
+            "Go": "Which keyword starts a lightweight concurrent function?",
+            "Rust": "Which concept enforces memory safety without a garbage collector?",
+        }
+        templates = {
+            "OOP": ("Which OOP concept lets one interface represent different implementations?", "Polymorphism", ["Encapsulation", "Compilation", "Normalization"], "Polymorphism allows different implementations behind a shared interface."),
+            "DBMS": ("Which SQL clause filters grouped aggregate results?", "HAVING", ["WHERE", "ORDER BY", "LIMIT"], "HAVING filters after GROUP BY aggregation."),
+            "Operating System": ("What is a deadlock?", "Processes waiting forever for each other", ["A fast context switch", "A memory allocation success", "A finished process"], "Deadlock happens when processes hold resources and wait cyclically."),
+            "Computer Networks": ("Which protocol is connection-oriented?", "TCP", ["UDP", "ICMP", "ARP"], "TCP establishes a connection and provides reliable delivery."),
+            "Memory Management": ("What does a memory leak mean?", "Allocated memory is not released when no longer needed", ["Memory is compressed", "Memory is encrypted", "Memory is cached"], "A leak keeps unreachable or unused memory allocated."),
+            "Exception Handling": ("What should exception handling preserve?", "Clear recovery or failure path", ["Hidden errors", "Silent crashes", "Random retries only"], "Good handling makes failure behavior explicit."),
+            "Multithreading": ("What issue can occur when threads update shared data without coordination?", "Race condition", ["Syntax error", "Type erasure", "Cache hit"], "Race conditions depend on unpredictable execution timing."),
+            "Language-specific Concepts": (code_prompt.get(language, code_prompt["Python"]), "Language-defined behavior", ["Always a compiler error", "Always null", "Always zero"], "The exact answer depends on the selected language's runtime rules."),
+            "Output Prediction": (f"In {language}, output prediction questions primarily test what?", "Understanding evaluation rules", ["Typing speed", "Package installation", "UI design"], "Output prediction checks language semantics and evaluation order."),
+            "Debugging": ("Which debugging step is usually best first?", "Reproduce the bug reliably", ["Rewrite all code", "Delete tests", "Ignore logs"], "Reliable reproduction makes diagnosis possible."),
+            "Code Tracing": ("Code tracing means:", "Following variable values step by step", ["Changing database schema", "Deploying a server", "Formatting CSS"], "Tracing follows execution state through code."),
+        }
+
+    prompt, correct, distractors, explanation = templates.get(topic, next(iter(templates.values())))
+    options, label = _shuffle_options(correct, distractors, f"{seed}|{topic}|{index}")
+    return {
+        "topic": f"{language} - {topic}" if arena == "programming" else topic,
+        "difficulty": difficulty,
+        "question_type": "mcq",
+        "prompt": f"{difficulty.title()} {topic}\n\n{prompt}",
+        "options": options,
+        "correct_answer": label,
+        "explanation": explanation,
+    }
+
+
+def _generate_twenty_question_test(arena: str, user_id: str, language: str = "Python") -> list[dict]:
+    topics = TWENTY_QUESTION_TOPICS[arena]
+    seed = f"{user_id}|{arena}|{language}"
+    questions = []
+    for index in range(1, 21):
+        topic = topics[(index - 1) % len(topics)]
+        questions.append(_generic_mcq_template(arena, topic, index, seed, language))
+    random.Random(int(hashlib.sha256(seed.encode("utf-8")).hexdigest(), 16)).shuffle(questions)
+    return questions
+
+
+def _numbered_questions(questions: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": index,
+            "number": index,
+            "topic": question["topic"],
+            "difficulty": question["difficulty"],
+            "question_type": question["question_type"],
+            "prompt": question["prompt"],
+            "options": question["options"],
+            "correct_answer": question["correct_answer"],
+            "explanation": question["explanation"],
+        }
+        for index, question in enumerate(questions, start=1)
+    ]
+
+
 def _evaluate_answer(question: dict, user_answer: str) -> dict:
     normalized = user_answer.strip().lower()
     correct_answer = str(question.get("correct_answer") or "").strip()
@@ -430,6 +570,14 @@ def _evaluate_answer(question: dict, user_answer: str) -> dict:
             if is_correct
             else "Good attempt. Improve by adding constraints, edge cases, complexity, and a clearer final answer."
         ),
+    }
+
+
+def _public_question(question: dict) -> dict:
+    return {
+        key: value
+        for key, value in question.items()
+        if key not in {"correct_answer", "explanation"}
     }
 
 
@@ -506,10 +654,12 @@ async def send_message(thread_id: str, payload: dict = None):
     if not message:
         raise HTTPException(status_code=400, detail="message required")
 
-    # Auto-generate title from first message if conversation is still "Untitled"
-    conv = load_conversation(thread_id)
-    # Check if this is the first message (empty conversation)
-    if not conv:  # Empty conversation
+    # Ensure direct API callers do not lose persistence when they post to a
+    # thread before creating it through POST /conversations.
+    existing_title = get_conversation_title(thread_id)
+    if existing_title is None:
+        create_conversation(thread_id, generate_chat_title(message))
+    elif existing_title == "Untitled" and not load_conversation(thread_id):
         generated_title = generate_chat_title(message)
         update_conversation_title(thread_id, generated_title)
 
@@ -577,6 +727,32 @@ async def get_msgs(thread_id: str):
     return load_conversation(thread_id)
 
 
+@app.post("/auth/signup", response_model=AuthResponse)
+async def signup(payload: SignupRequest, db=Depends(get_db)):
+    try:
+        user = create_user(db, payload.full_name, payload.email, payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    access_token = create_access_token({"sub": user.email})
+    return AuthResponse(access_token=access_token, user=user)
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+async def login(payload: LoginRequest, db=Depends(get_db)):
+    user = authenticate_user(db, payload.email, payload.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    access_token = create_access_token({"sub": user.email})
+    return AuthResponse(access_token=access_token, user=user)
+
+
+@app.get("/auth/me", response_model=UserRead)
+async def get_me(current_user=Depends(get_current_user)):
+    return current_user
+
+
 @app.get("/mock-tests/catalog")
 async def mock_test_catalog():
     return [
@@ -585,8 +761,69 @@ async def mock_test_catalog():
     ]
 
 
+@app.post("/mock/{arena}/generate")
+async def generate_isolated_mock(
+    arena: str,
+    payload: dict = None,
+    current_user=Depends(get_current_user),
+):
+    payload = payload or {}
+    requested_arena = arena.lower()
+    normalized_arena = "reasoning" if requested_arena in {"logical", "reasoning"} else requested_arena
+    user_id = current_user.id
+    language = str(payload.get("language") or "Python")
+
+    if normalized_arena == "aptitude":
+        recent_prompts = get_recent_mock_test_prompts(user_id, "aptitude", limit=80)
+        questions = _generate_aptitude_test_questions(user_id, recent_prompts)
+        return {
+            "arena": "aptitude",
+            "title": "Aptitude Mock Test",
+            "timer_seconds": 30 * 60,
+            "questions": _numbered_questions(questions),
+        }
+
+    if normalized_arena in {"verbal", "reasoning", "programming"}:
+        questions = _generate_twenty_question_test(normalized_arena, user_id, language)
+        title_map = {
+            "verbal": "Verbal Ability Mock Test",
+            "reasoning": "Logical Reasoning Mock Test",
+            "programming": "Programming Concepts Mock Test",
+        }
+        return {
+            "arena": normalized_arena,
+            "title": title_map[normalized_arena],
+            "timer_seconds": 30 * 60,
+            "questions": _numbered_questions(questions),
+        }
+
+    if normalized_arena == "dsa":
+        profile_context = _load_profile_context(user_id, payload)
+        recent_prompts = get_recent_mock_test_prompts(user_id, "dsa")
+        question = _generate_mock_question("dsa", payload, profile_context, recent_prompts)
+        return {
+            "arena": "dsa",
+            "title": "DSA Mock Test",
+            "timer_seconds": 45 * 60,
+            "question": {
+                "id": 1,
+                "number": 1,
+                "topic": question["topic"],
+                "difficulty": question["difficulty"],
+                "question_type": question["question_type"],
+                "prompt": question["prompt"],
+                "options": question["options"],
+                "correct_answer": question["correct_answer"],
+                "explanation": question["explanation"],
+            },
+            "profile_context": profile_context,
+        }
+
+    raise HTTPException(status_code=400, detail="Unsupported mock arena")
+
+
 @app.post("/mock-tests/start")
-async def start_mock_test(payload: dict = None):
+async def start_mock_test(payload: dict = None, current_user=Depends(get_current_user)):
     payload = payload or {}
     test_type = str(payload.get("test_type") or "").lower()
     if test_type not in MOCK_TEST_META:
@@ -595,7 +832,7 @@ async def start_mock_test(payload: dict = None):
     if test_type == "programming" and not payload.get("language"):
         raise HTTPException(status_code=400, detail="Programming language is required")
 
-    user_id = _user_id_from_payload(payload)
+    user_id = current_user.id
     profile_context = _load_profile_context(user_id, payload) if test_type == "dsa" else {
         "leetcode": None,
         "gfg": None,
@@ -636,13 +873,13 @@ async def start_mock_test(payload: dict = None):
         "test_type": test_type,
         "title": MOCK_TEST_META[test_type]["title"],
         "timer_seconds": 2700 if test_type == "dsa" else 90,
-        "question": {**question, "id": question_id},
+        "question": {**_public_question(question), "id": question_id},
         "profile_context": profile_context,
     }
 
 
 @app.post("/mock-tests/submit")
-async def submit_mock_test_answer(payload: dict = None):
+async def submit_mock_test_answer(payload: dict = None, current_user=Depends(get_current_user)):
     payload = payload or {}
     question_id = int(payload.get("question_id") or 0)
     user_answer = str(payload.get("answer") or "")
@@ -655,6 +892,10 @@ async def submit_mock_test_answer(payload: dict = None):
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
 
+    attempt = get_mock_test_attempt(int(question["attempt_id"]))
+    if not attempt or attempt.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized to submit this test")
+
     result = _evaluate_answer(question, user_answer)
     save_mock_test_answer(
         question_id,
@@ -663,11 +904,19 @@ async def submit_mock_test_answer(payload: dict = None):
         time_spent_seconds,
         int(result["xp"]),
     )
+    complete_mock_test_attempt(int(question["attempt_id"]))
     return result
 
 
+@app.get("/mock-tests/analytics")
+async def mock_test_analytics(current_user=Depends(get_current_user)):
+    return get_mock_test_analytics(current_user.id)
+
+
 @app.get("/mock-tests/analytics/{user_id}")
-async def mock_test_analytics(user_id: str):
+async def mock_test_analytics_for_user(user_id: str, current_user=Depends(get_current_user)):
+    if user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return get_mock_test_analytics(user_id)
 
 
@@ -677,9 +926,9 @@ async def mock_test_leaderboard(user_id: str = Query("default_user")):
 
 
 @app.post("/aptitude-tests/generate")
-async def generate_aptitude_test(payload: dict = None):
+async def generate_aptitude_test(payload: dict = None, current_user=Depends(get_current_user)):
     payload = payload or {}
-    user_id = _user_id_from_payload(payload)
+    user_id = current_user.id
     company = str(payload.get("company") or "general")
     recent_prompts = get_recent_mock_test_prompts(user_id, "aptitude", limit=80)
     questions = _generate_aptitude_test_questions(user_id, recent_prompts)
@@ -728,7 +977,7 @@ async def generate_aptitude_test(payload: dict = None):
 
 
 @app.post("/aptitude-tests/submit")
-async def submit_aptitude_test(payload: dict = None):
+async def submit_aptitude_test(payload: dict = None, current_user=Depends(get_current_user)):
     payload = payload or {}
     attempt_id = int(payload.get("attempt_id") or 0)
     answers = payload.get("answers") or {}
@@ -739,6 +988,8 @@ async def submit_aptitude_test(payload: dict = None):
     attempt = get_mock_test_attempt(attempt_id)
     if not attempt or attempt.get("test_type") != "aptitude":
         raise HTTPException(status_code=404, detail="Aptitude attempt not found")
+    if attempt.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized to submit this attempt")
 
     questions = get_mock_test_attempt_questions(attempt_id)
     results = []
@@ -827,8 +1078,15 @@ async def submit_aptitude_test(payload: dict = None):
     }
 
 
+@app.get("/aptitude-tests/attempts")
+async def aptitude_attempts(current_user=Depends(get_current_user)):
+    return get_previous_mock_test_attempts(current_user.id, "aptitude")
+
+
 @app.get("/aptitude-tests/attempts/{user_id}")
-async def aptitude_attempts(user_id: str):
+async def aptitude_attempts_for_user(user_id: str, current_user=Depends(get_current_user)):
+    if user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return get_previous_mock_test_attempts(user_id, "aptitude")
 
 
