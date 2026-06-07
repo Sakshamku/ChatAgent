@@ -1,139 +1,250 @@
-# ChatAgent
+# ChatAgent – Agentic AI Learning, Assessment & Career Preparation Platform
 
-ChatAgent is an AI assistant project with a Python backend, a Next.js frontend, persistent chat history, PDF-aware conversations, coding profile analytics, and a Mock Test Arena for interview preparation.
+ChatAgent is a full-stack **Agentic AI platform** designed to help users learn, practice, and prepare for technical interviews through intelligent conversations, personalized assessments, coding profile analysis, and long-term memory.
 
-## Features
+The platform combines **LLM-powered conversational AI**, **persistent memory**, **tool calling**, **Retrieval-Augmented Generation (RAG)**, **coding analytics**, and an **AI-driven Mock Test Arena** into a unified learning ecosystem.
 
-- Persistent chat history stored in SQLite.
-- FastAPI backend for conversations, PDF uploads, messages, coding analytics, and mock tests.
-- Next.js frontend in `next-frontend/`.
-- PDF RAG support with per-thread document metadata and vector stores.
-- Python code interpreter workspace for uploaded files and generated artifacts.
-- LeetCode and GeeksforGeeks profile analytics.
-- **Authentication system** for Mock Test Arena (Phase 1 ✅)
-  - User registration & login with secure password hashing (bcrypt)
-  - JWT token-based session management
-  - Protected mock test endpoints with user isolation
-  - Session persistence with localStorage
-  - See [AUTHENTICATION.md](AUTHENTICATION.md) for details
-- Mock Test Arena for DSA, aptitude, verbal ability, logical reasoning, and programming concept practice.
-- Aptitude test generation with timed questions, scoring, topic analysis, and suggestions.
-## Project Structure
+---
 
-```text
-ChatAgent/
-|-- backend/
-|   |-- api/
-|   |   `-- main.py              # FastAPI application and API routes
-|   |-- coding_platforms/        # LeetCode/GFG fetchers and analytics helpers
-|   |-- Backend.py               # LangGraph chatbot, tools, PDF RAG, mock interview logic
-|   |-- code_interpreter.py      # Python execution workspace helpers
-|   |-- coding_tools.py          # LangChain tools for coding analytics
-|   |-- database.py              # SQLite database layer
-|   |-- utils.py                 # Shared backend utilities
-|   `-- requirements.txt         # Python dependencies
-|-- next-frontend/               # Next.js frontend app
-|-- tests/                       # Pytest tests
-|-- data/                        # Local SQLite databases, ignored by Git
-|-- memory/                      # Local vector stores and planning notes
-|-- .env                         # Local API keys, ignored by Git
-`-- .gitignore
-```
+## Key Features
 
-## Mock Test Arena
+### Agentic AI Chat Assistant
 
-The Mock Test Arena lets users practice interview-style tests from the frontend. The backend supports:
+* Multi-tool AI assistant capable of autonomous reasoning and task execution.
+* Persistent memory system that maintains context across conversations.
+* Personalized interactions based on historical user activity and preferences.
+* Tool-calling architecture enabling dynamic retrieval, analytics, and assessment workflows.
+* Context-aware conversations with long-term memory persistence.
 
-- Test catalog: `GET /mock-tests/catalog`
-- Start a single-question adaptive mock test: `POST /mock-tests/start`
-- Submit an answer and receive scoring/feedback: `POST /mock-tests/submit`
-- View analytics and leaderboard data: `GET /mock-tests/analytics/{user_id}` and `GET /mock-tests/leaderboard`
-- Generate a 20-question aptitude test: `POST /aptitude-tests/generate`
-- Submit aptitude answers with topic-level analysis: `POST /aptitude-tests/submit`
-- View previous aptitude attempts: `GET /aptitude-tests/attempts/{user_id}`
+### PDF-Aware Conversations (RAG)
 
-Supported practice areas include DSA, aptitude, verbal ability, logical reasoning, and programming concepts.
+* Upload PDFs and interact with documents through natural language.
+* Retrieval-Augmented Generation (RAG) pipeline using vector embeddings and semantic search.
+* Per-thread document context management.
+* Source-aware responses grounded in uploaded documents.
+* Supports multi-document knowledge retrieval and contextual follow-up questions.
 
-## Authentication (Phase 1)
+### Coding Profile Analytics
 
-The Mock Test Arena now includes user authentication. For complete setup, testing, and deployment details, see:
+Analyze competitive programming profiles to generate personalized recommendations.
 
-- **[AUTHENTICATION.md](AUTHENTICATION.md)** - Technical reference and architecture
-- **[AUTH_QUICKSTART.md](AUTH_QUICKSTART.md)** - Setup guide, testing workflow, and API examples
-- **[AUTH_CHANGELOG.md](AUTH_CHANGELOG.md)** - File manifest and change log
+Supported Platforms:
 
-### Quick Overview
-- **Signup/Login** - POST `/auth/signup` and `/auth/login` endpoints
-- **Protected Endpoints** - All mock test endpoints require JWT token in `Authorization` header
-- **Session Persistence** - Tokens stored in localStorage, auto-validate on app load
-- **User Isolation** - Each user's test attempts and analytics are private
-- **No Impact on Chat** - Chat system remains completely unchanged
+* LeetCode
+* GeeksforGeeks
 
-To get started: See [AUTH_QUICKSTART.md](AUTH_QUICKSTART.md) section 2-3 for environment setup.
+Features:
 
-## Setup
+* Problem-solving statistics analysis
+* Difficulty distribution tracking
+* Topic-wise performance insights
+* Weak area identification
+* Personalized DSA question generation
+* Interview readiness evaluation
+* Coding progress monitoring
+
+### Mock Test Arena
+
+AI-powered interview preparation environment supporting multiple assessment categories.
+
+#### DSA Mock Test
+
+* LeetCode and GFG profile analysis
+* Personalized coding question generation
+* Adaptive difficulty selection
+* Weak-topic targeting
+* Interview-style evaluation
+
+#### Aptitude Mock Test
+
+* 20-question adaptive assessments
+* Timed test environment
+* Topic-wise performance analysis
+* Accuracy and speed tracking
+* Personalized improvement suggestions
+
+Topics Covered:
+
+* Profit & Loss
+* Percentage
+* Ratio & Proportion
+* Time & Work
+* Probability
+* Number System
+* Data Interpretation
+* Time Speed Distance
+
+#### Verbal Ability Mock Test
+
+* Grammar
+* Vocabulary
+* Synonyms & Antonyms
+* Reading Comprehension
+* Fill in the Blanks
+* Para Jumbles
+
+#### Logical Reasoning Mock Test
+
+* Coding-Decoding
+* Blood Relations
+* Syllogism
+* Seating Arrangement
+* Direction Sense
+* Puzzle Solving
+* Statement & Conclusion
+
+#### Programming Concepts Mock Test
+
+Language-specific assessments for:
+
+* C++
+* Java
+* Python
+* JavaScript
+* C
+* Go
+* Rust
+
+Topics:
+
+* OOP
+* DBMS
+* Operating Systems
+* Computer Networks
+* Memory Management
+* Exception Handling
+* Multithreading
+* Output Prediction
+* Debugging
+* Code Tracing
+
+### Performance Analytics
+
+* Accuracy tracking
+* Topic-wise analytics
+* Test history
+* Weak and strong area detection
+* Learning recommendations
+* Performance trend analysis
+* Leaderboard support
+* Personalized feedback generation
+
+### Authentication & User Management
+
+* Secure user registration and login
+* JWT-based authentication
+* Password hashing with bcrypt
+* Protected assessment APIs
+* Session persistence
+* User-specific analytics and assessment history
+
+---
+
+## Architecture
 
 ### Backend
 
-```powershell
-cd D:\ChatAgent
-myvnv\Scripts\activate
-pip install -r backend\requirements.txt
-```
+Built using FastAPI and Python.
 
-Create a local `.env` file:
+Core Components:
 
-```env
-MISTRAL_API_KEY=your_mistral_api_key_here
-ALPHA_VANTAGE_API_KEY=your_alpha_vantage_api_key_here
-```
+* Agent orchestration layer
+* Tool execution framework
+* Memory persistence system
+* RAG pipeline
+* Coding analytics engine
+* Assessment generation engine
+* Authentication services
+* Database management layer
 
-Run the FastAPI backend:
+### Frontend
 
-```powershell
-myvnv\Scripts\uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
-```
+Built using:
 
-### Next.js Frontend
+* Next.js
+* React
+* TypeScript
+* Tailwind CSS
+* ShadCN UI
+* Framer Motion
 
-```powershell
-cd D:\ChatAgent\next-frontend
-npm install
-npm run dev
-```
+Provides:
 
-Open the frontend at:
+* Conversational AI interface
+* Assessment dashboard
+* Analytics visualizations
+* Profile management
+* Responsive user experience
 
-```text
-http://localhost:3000
-```
+### Storage Layer
 
-## Local Data
+* SQLite for application data
+* Vector stores for document retrieval
+* Persistent chat history storage
+* User assessment history
+* Memory management system
 
-Runtime files are kept out of Git:
+---
 
-- `data/chat_history.db`
-- `data/chatbot.db`
-- `memory/vectorstores/`
-- `.env`
-- virtual environments such as `myvnv/`, `.venv/`, and `venv/`
-- frontend build/dependency folders such as `node_modules/` and `.next/`
+## Tech Stack
 
-## Development
+### AI & Agent Frameworks
 
-Run tests:
+* LangGraph
+* LangChain
+* Retrieval-Augmented Generation (RAG)
+* Tool Calling
+* Persistent Memory
+* LLM Orchestration
 
-```powershell
-pytest tests
-```
+### Backend
 
-Live LeetCode API tests are skipped by default. To enable them:
+* Python
+* FastAPI
+* SQLite
+* JWT Authentication
+* Bcrypt
 
-```powershell
-$env:RUN_LEETCODE_LIVE_TESTS="1"
-pytest tests
-```
+### Frontend
 
-## Git Notes
+* Next.js
+* React
+* TypeScript
+* Tailwind CSS
+* ShadCN UI
+* Framer Motion
 
-Do not commit `.env`, local databases, virtual environments, `node_modules`, or build output. If any secret key was previously pushed to GitHub, rotate that key immediately even after removing the file from the repository.
+### Data & Retrieval
+
+* Vector Databases
+* Semantic Search
+* Embeddings
+* PDF Processing
+
+---
+
+## Future Enhancements
+
+* Voice-based AI Interviewer
+* Resume Analysis Agent
+* Company-Specific Interview Tracks
+* Multi-Agent Collaboration Framework
+* AI Career Mentor
+* Personalized Learning Roadmaps
+* Advanced Performance Prediction
+* Real-Time Coding Interview Simulator
+
+---
+
+## Project Highlights
+
+* Agentic AI Architecture
+* Tool Calling & Workflow Orchestration
+* Persistent Memory System
+* RAG-based PDF Intelligence
+* Coding Profile Analytics
+* Adaptive Assessment Generation
+* Personalized Learning Recommendations
+* Real-Time Performance Analytics
+* Full-Stack Production Architecture
+* Secure Authentication & User Isolation
