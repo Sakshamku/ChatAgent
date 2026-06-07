@@ -11,7 +11,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import Column, DateTime, String, Text, create_engine, func
+from sqlalchemy import Column, DateTime, String, Text, create_engine, func, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
@@ -41,6 +41,7 @@ class User(Base):
     email = Column(String(255), nullable=False, unique=True, index=True)
     password_hash = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class UserCreate(BaseModel):
@@ -79,6 +80,13 @@ class AuthResponse(BaseModel):
 def init_auth_db() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    if str(engine.url).startswith("sqlite"):
+        inspector = inspect(engine)
+        if "users" in inspector.get_table_names():
+            columns = {column["name"] for column in inspector.get_columns("users")}
+            if "updated_at" not in columns:
+                with engine.begin() as connection:
+                    connection.execute(text("ALTER TABLE users ADD COLUMN updated_at DATETIME"))
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -143,12 +151,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("sub")
-        if email is None:
+        user_id = payload.get("user_id")
+        if email is None and user_id is None:
             raise credentials_exception
     except jwt.PyJWTError:
         raise credentials_exception
 
-    user = get_user_by_email(db, email)
+    if user_id:
+        user = db.query(User).filter(User.id == str(user_id)).first()
+    else:
+        user = get_user_by_email(db, email)
     if user is None:
         raise credentials_exception
     return user

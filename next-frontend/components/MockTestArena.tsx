@@ -4,14 +4,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   Award,
-  BarChart3,
   BookOpen,
   BrainCircuit,
   CheckCircle2,
   Code2,
-  Flame,
   Gauge,
-  GraduationCap,
   Loader2,
   Moon,
   Network,
@@ -19,10 +16,9 @@ import {
   Sparkles,
   Sun,
   Timer,
-  Trophy,
   XCircle,
 } from "lucide-react";
-import { API_BASE, authFetch } from "../lib/api";
+import { API_BASE, authFetch, submitTestResult } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 
 type Arena = "dsa" | "aptitude" | "verbal" | "reasoning" | "programming";
@@ -87,18 +83,6 @@ interface DsaEvaluation {
   missing: string[];
 }
 
-interface Analytics {
-  answered: number;
-  correct: number;
-  accuracy: number;
-  avg_time: number;
-  streak: number;
-  xp: number;
-  strong_topics: Array<{ topic: string; answered: number; correct: number }>;
-  weak_topics: Array<{ topic: string; answered: number; correct: number }>;
-  leaderboard: Array<{ user_id: string; xp: number; correct: number }>;
-}
-
 const TESTS: TestCard[] = [
   {
     id: "dsa",
@@ -138,7 +122,6 @@ const TESTS: TestCard[] = [
 ];
 
 const LANGUAGES = ["Python", "JavaScript", "Java", "C++", "C", "Go", "Rust"];
-const ARENA_ORDER: Arena[] = ["dsa", "aptitude", "verbal", "reasoning", "programming"];
 
 function emptyArenaMap<T>(value: T): Record<Arena, T> {
   return {
@@ -235,28 +218,14 @@ export default function MockTestArena() {
   const [gfgUsername, setGfgUsername] = useState("");
   const [language, setLanguage] = useState("Python");
   const [loadingArena, setLoadingArena] = useState<Arena | null>(null);
+  const [submittingArena, setSubmittingArena] = useState<Arena | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [darkMode, setDarkMode] = useState(true);
 
   const { token } = useAuth();
   const selectedMeta = TESTS.find((test) => test.id === selectedArena) ?? TESTS[0];
   const selectedTest = arenaTests[selectedArena];
   const selectedResult = results[selectedArena];
-
-  useEffect(() => {
-    async function loadAnalytics() {
-      try {
-        if (!token) return;
-        const data = await authFetch<Analytics>(`${API_BASE}/mock-tests/analytics`, token);
-        setAnalytics(data);
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
-    loadAnalytics();
-  }, [token]);
 
   useEffect(() => {
     if (!selectedTest || selectedResult || timeLeft[selectedArena] <= 0) return;
@@ -305,15 +274,75 @@ export default function MockTestArena() {
     }
   }
 
-  function submitTwentyQuestionTest(test: TwentyQuestionTest) {
-    const result = scoreTwentyQuestionTest(test, answers[test.arena], elapsed[test.arena]);
-    setResults((prev) => ({ ...prev, [test.arena]: result }));
+  function notifyResultViews() {
+    window.dispatchEvent(new CustomEvent("mock-results-updated"));
+    window.localStorage.setItem("mock-results-updated-at", String(Date.now()));
   }
 
-  function submitDsaAnswer(test: DsaTest) {
+  async function submitTwentyQuestionTest(test: TwentyQuestionTest) {
+    const result = scoreTwentyQuestionTest(test, answers[test.arena], elapsed[test.arena]);
+    setSubmittingArena(test.arena);
+    setError(null);
+    try {
+      if (!token) throw new Error("Session expired. Please sign in again.");
+      await submitTestResult(
+        {
+          test_id: test.arena,
+          test_name: test.title,
+          total_questions: test.questions.length,
+          time_taken_seconds: result.elapsedSeconds,
+          questions: test.questions.map((question) => ({
+            question_id: question.id,
+            subject: question.topic,
+            selected_answer: answers[test.arena][String(question.id)] ?? "",
+            correct_answer: question.correct_answer,
+            time_spent: Math.max(1, Math.floor(result.elapsedSeconds / Math.max(1, test.questions.length))),
+          })),
+        },
+        token
+      );
+      setResults((prev) => ({ ...prev, [test.arena]: result }));
+      notifyResultViews();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save test result");
+    } finally {
+      setSubmittingArena(null);
+    }
+  }
+
+  async function submitDsaAnswer(test: DsaTest) {
     const answer = answers.dsa[String(test.question.id)] ?? "";
     if (!answer.trim()) return;
-    setResults((prev) => ({ ...prev, dsa: evaluateDsaAnswer(answer) }));
+    const result = evaluateDsaAnswer(answer);
+    setSubmittingArena("dsa");
+    setError(null);
+    try {
+      if (!token) throw new Error("Session expired. Please sign in again.");
+      await submitTestResult(
+        {
+          test_id: "dsa",
+          test_name: test.title,
+          total_questions: 1,
+          time_taken_seconds: elapsed.dsa,
+          questions: [
+            {
+              question_id: test.question.id,
+              subject: test.question.topic,
+              selected_answer: result.score >= 60 ? "PASS" : "REVIEW",
+              correct_answer: "PASS",
+              time_spent: elapsed.dsa,
+            },
+          ],
+        },
+        token
+      );
+      setResults((prev) => ({ ...prev, dsa: result }));
+      notifyResultViews();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save DSA result");
+    } finally {
+      setSubmittingArena(null);
+    }
   }
 
   function selectArena(arena: Arena) {
@@ -339,6 +368,7 @@ export default function MockTestArena() {
           }
           timeLeft={timeLeft.dsa}
           result={results.dsa as DsaEvaluation | null}
+          isSubmitting={submittingArena === "dsa"}
           onSubmit={() => submitDsaAnswer(selectedTest)}
           onRegenerate={() => generateArenaTest("dsa")}
         />
@@ -353,6 +383,7 @@ export default function MockTestArena() {
         activeIndex={activeIndex[selectedTest.arena]}
         timeLeft={timeLeft[selectedTest.arena]}
         result={results[selectedTest.arena] as TestResult | null}
+        isSubmitting={submittingArena === selectedTest.arena}
         onAnswer={(questionId, value) =>
           setAnswers((prev) => ({
             ...prev,
@@ -383,6 +414,26 @@ export default function MockTestArena() {
               <h1 className="mt-1 text-2xl font-semibold tracking-normal md:text-3xl">
                 Mock Test Arena
               </h1>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Link
+                  href="/mock-test-arena"
+                  className="rounded-full border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                >
+                  Take Test
+                </Link>
+                <Link
+                  href="/analytics"
+                  className="rounded-full border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                >
+                  Dashboard
+                </Link>
+                <Link
+                  href="/profile"
+                  className="rounded-full border border-blue-500 bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-600"
+                >
+                  Profile
+                </Link>
+              </div>
             </div>
             <button
               type="button"
@@ -395,7 +446,7 @@ export default function MockTestArena() {
           </div>
         </header>
 
-        <div className="mx-auto grid max-w-7xl gap-6 px-4 py-6 md:px-8 lg:grid-cols-[1fr_360px]">
+        <div className="mx-auto max-w-7xl px-4 py-6 md:px-8">
           <section className="space-y-6">
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {TESTS.map((test) => {
@@ -497,11 +548,6 @@ export default function MockTestArena() {
 
             {renderSelectedArena()}
           </section>
-
-          <aside className="space-y-4">
-            <AnalyticsPanel analytics={analytics} />
-            <ArenaStatePanel arenaTests={arenaTests} />
-          </aside>
         </div>
       </div>
     </main>
@@ -557,6 +603,7 @@ interface TwentyQuestionProps {
   onIndexChange: (index: number) => void;
   onSubmit: () => void;
   onRegenerate: () => void;
+  isSubmitting?: boolean;
 }
 
 function TwentyQuestionMockTest(props: TwentyQuestionProps) {
@@ -595,6 +642,7 @@ function TwentyQuestionContent({
   onIndexChange,
   onSubmit,
   onRegenerate,
+  isSubmitting = false,
 }: TwentyQuestionProps) {
   const question = test.questions[activeIndex] ?? test.questions[0];
   const answeredCount = Object.keys(answers).length;
@@ -719,10 +767,11 @@ function TwentyQuestionContent({
         <button
           type="button"
           onClick={onSubmit}
-          className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 dark:bg-zinc-100 dark:text-zinc-950"
+          disabled={isSubmitting}
+          className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950"
         >
-          <CheckCircle2 className="h-4 w-4" />
-          Submit Test
+          {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+          {isSubmitting ? "Saving..." : "Submit Test"}
         </button>
       </div>
     </div>
@@ -738,6 +787,7 @@ function DSAMockTest({
   result,
   onSubmit,
   onRegenerate,
+  isSubmitting = false,
 }: {
   selectedArena: Arena;
   test: DsaTest;
@@ -747,6 +797,7 @@ function DSAMockTest({
   result: DsaEvaluation | null;
   onSubmit: () => void;
   onRegenerate: () => void;
+  isSubmitting?: boolean;
 }) {
   if (test.arena !== selectedArena) return null;
 
@@ -786,11 +837,11 @@ function DSAMockTest({
         <button
           type="button"
           onClick={onSubmit}
-          disabled={!answer.trim()}
+          disabled={!answer.trim() || isSubmitting}
           className="inline-flex h-10 items-center gap-2 rounded-full bg-slate-950 px-5 text-sm font-semibold text-white transition hover:bg-blue-600 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950"
         >
-          <CheckCircle2 className="h-4 w-4" />
-          Submit Answer
+          {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+          {isSubmitting ? "Saving..." : "Submit Answer"}
         </button>
         <button
           type="button"
@@ -895,77 +946,6 @@ function ResultView({
   );
 }
 
-function AnalyticsPanel({ analytics }: { analytics: Analytics | null }) {
-  return (
-    <>
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="flex items-center gap-2 font-semibold">
-          <BarChart3 className="h-5 w-5 text-blue-500" />
-          Performance Analytics
-        </h2>
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <Metric icon={Award} label="Accuracy" value={`${analytics?.accuracy ?? 0}%`} />
-          <Metric icon={Timer} label="Avg Speed" value={`${analytics?.avg_time ?? 0}s`} />
-          <Metric icon={Flame} label="Streak" value={`${analytics?.streak ?? 0}d`} />
-          <Metric icon={Sparkles} label="XP" value={`${analytics?.xp ?? 0}`} />
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="flex items-center gap-2 font-semibold">
-          <GraduationCap className="h-5 w-5 text-emerald-500" />
-          Topic Signals
-        </h2>
-        <TopicList title="Strong" topics={analytics?.strong_topics ?? []} />
-        <TopicList title="Weak" topics={analytics?.weak_topics ?? []} />
-      </div>
-
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <h2 className="flex items-center gap-2 font-semibold">
-          <Trophy className="h-5 w-5 text-amber-500" />
-          Leaderboard
-        </h2>
-        <div className="mt-4 space-y-2">
-          {(analytics?.leaderboard ?? []).length === 0 ? (
-            <p className="text-sm text-slate-500 dark:text-zinc-400">No attempts yet.</p>
-          ) : (
-            analytics?.leaderboard.map((row, index) => (
-              <div
-                key={row.user_id}
-                className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm dark:bg-zinc-950"
-              >
-                <span className="truncate">#{index + 1} {row.user_id}</span>
-                <span className="font-semibold">{row.xp} XP</span>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </>
-  );
-}
-
-function ArenaStatePanel({ arenaTests }: { arenaTests: Record<Arena, ArenaTest | null> }) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 className="font-semibold">Generated Arenas</h2>
-      <div className="mt-4 space-y-2">
-        {ARENA_ORDER.map((arena) => (
-          <div
-            key={arena}
-            className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm dark:bg-zinc-950"
-          >
-            <span className="capitalize">{arena === "reasoning" ? "logical reasoning" : arena}</span>
-            <span className={arenaTests[arena] ? "text-emerald-500" : "text-slate-400"}>
-              {arenaTests[arena] ? "Ready" : "Empty"}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function Metric({
   icon: Icon,
   label,
@@ -980,36 +960,6 @@ function Metric({
       <Icon className="h-4 w-4 text-blue-500" />
       <p className="mt-2 text-xs text-slate-500 dark:text-zinc-500">{label}</p>
       <p className="text-lg font-semibold">{value}</p>
-    </div>
-  );
-}
-
-function TopicList({
-  title,
-  topics,
-}: {
-  title: string;
-  topics: Array<{ topic: string; answered: number; correct: number }>;
-}) {
-  return (
-    <div className="mt-4">
-      <p className="text-xs font-semibold uppercase text-slate-500 dark:text-zinc-500">
-        {title}
-      </p>
-      <div className="mt-2 space-y-2">
-        {topics.length === 0 ? (
-          <p className="text-sm text-slate-500 dark:text-zinc-400">Not enough data yet.</p>
-        ) : (
-          topics.map((topic) => (
-            <div key={topic.topic} className="rounded-xl bg-slate-50 px-3 py-2 dark:bg-zinc-950">
-              <div className="flex justify-between gap-3 text-sm">
-                <span className="truncate">{topic.topic}</span>
-                <span>{topic.correct}/{topic.answered}</span>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
     </div>
   );
 }

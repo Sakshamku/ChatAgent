@@ -5,6 +5,7 @@ import hashlib
 import json
 import random
 import threading
+from datetime import date
 from typing import AsyncGenerator
 
 import uvicorn
@@ -23,7 +24,22 @@ from backend.auth import (
     create_user,
     get_current_user,
     get_db,
+    Base,
+    engine,
 )
+from backend.models import TestResult, SubjectResult, ensure_result_schema
+from backend.schemas import (
+    TestResultCreate,
+    TestResultResponse,
+    AnalyticsResponse,
+    ProfileOverviewResponse,
+    StrengthAnalysisResponse,
+    RecentActivityItem,
+    AccuracyTrendPoint,
+    SubjectPerformance,
+    TestSubmitRequest,
+)
+from backend.services import TestResultService
 from backend.Backend import (
     chatbot,
     ingest_pdf,
@@ -65,6 +81,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize database tables for models
+Base.metadata.create_all(bind=engine)
+ensure_result_schema(engine)
 
 _DONE = object()
 
@@ -734,7 +754,7 @@ async def signup(payload: SignupRequest, db=Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    access_token = create_access_token({"sub": user.email})
+    access_token = create_access_token({"sub": user.email, "user_id": user.id})
     return AuthResponse(access_token=access_token, user=user)
 
 
@@ -744,7 +764,7 @@ async def login(payload: LoginRequest, db=Depends(get_db)):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    access_token = create_access_token({"sub": user.email})
+    access_token = create_access_token({"sub": user.email, "user_id": user.id})
     return AuthResponse(access_token=access_token, user=user)
 
 
@@ -1088,6 +1108,249 @@ async def aptitude_attempts_for_user(user_id: str, current_user=Depends(get_curr
     if user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Forbidden")
     return get_previous_mock_test_attempts(user_id, "aptitude")
+
+
+# ==================== MOCK TEST RESULTS ENDPOINTS ====================
+
+
+@app.post("/mock-tests/results", response_model=TestResultResponse)
+async def save_test_result(
+    test_data: TestResultCreate,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Save a mock test result with subject-wise breakdown."""
+    try:
+        result = TestResultService.create_test_result(db, current_user.id, test_data)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/tests/submit")
+async def submit_test(
+    payload: TestSubmitRequest,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Validate submitted answers, store analytics, and return refreshed data."""
+    try:
+        return TestResultService.submit_test(db, current_user.id, payload)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/mock-tests/results", response_model=list[TestResultResponse])
+async def get_test_results(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get all test results for the authenticated user (latest first)."""
+    results = TestResultService.get_test_results(db, current_user.id, skip, limit)
+    return results
+
+
+@app.get("/mock-tests/results/{result_id}", response_model=TestResultResponse)
+async def get_test_result_detail(
+    result_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get a specific test result with all subject details."""
+    result = TestResultService.get_test_result_by_id(db, current_user.id, result_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Test result not found")
+    return result
+
+
+@app.delete("/mock-tests/results/{result_id}")
+async def delete_test_result(
+    result_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Delete a test result and its subject results."""
+    deleted = TestResultService.delete_test_result(db, current_user.id, result_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Test result not found")
+    return {"message": "Test result deleted successfully"}
+
+
+@app.get("/mock-tests/results-analytics", response_model=AnalyticsResponse)
+async def get_analytics(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get overall analytics for the authenticated user."""
+    analytics = TestResultService.calculate_analytics(db, current_user.id)
+    return analytics
+
+
+@app.get("/mock-tests/progress")
+async def get_progress(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get progress data for graphing test scores over time."""
+    progress_data = TestResultService.get_progress_data(db, current_user.id)
+    return progress_data
+
+
+@app.get("/mock-tests/subject-performance")
+async def get_subject_performance(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get subject-wise performance statistics."""
+    performance = TestResultService.calculate_subject_performance(db, current_user.id)
+    return performance
+
+
+@app.get("/mock-tests/stats")
+async def get_test_stats(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Get quick statistics about test attempts."""
+    total_count = TestResultService.get_test_results_count(db, current_user.id)
+    analytics = TestResultService.calculate_analytics(db, current_user.id)
+    return {
+        "total_tests_taken": total_count,
+        "average_score": analytics.average_score,
+        "best_score": analytics.best_score,
+        "worst_score": analytics.worst_score,
+        "average_accuracy": analytics.average_accuracy,
+    }
+
+
+@app.get("/dashboard")
+async def get_dashboard(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_dashboard(db, current_user.id)
+
+
+@app.get("/profile")
+async def get_profile(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_complete_profile(db, current_user.id)
+
+
+@app.get("/tests/history")
+async def get_tests_history(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    skip = (page - 1) * limit
+    history = TestResultService.get_profile_history(
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+    )
+    return {
+        "items": history["results"],
+        "total": history["total"],
+        "page": page,
+        "limit": limit,
+    }
+
+
+@app.get("/profile/overview", response_model=ProfileOverviewResponse)
+async def get_profile_overview(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    overview = TestResultService.get_profile_overview(db, current_user.id)
+    return overview
+
+
+@app.get("/profile/test-history")
+async def get_profile_test_history(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    query: str | None = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    min_score: float | None = Query(None, ge=0, le=100),
+    max_score: float | None = Query(None, ge=0, le=100),
+    sort_by: str = Query("attempted_at"),
+    sort_dir: str = Query("desc"),
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_profile_history(
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+        query_text=query,
+        date_from=date_from,
+        date_to=date_to,
+        min_score=min_score,
+        max_score=max_score,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+
+
+@app.get("/profile/recent-activity", response_model=list[RecentActivityItem])
+async def get_profile_recent_activity(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_recent_activity(db, current_user.id)
+
+
+@app.get("/profile/performance-trend", response_model=list[dict])
+async def get_profile_performance_trend(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_progress_data(db, current_user.id)
+
+
+@app.get("/profile/accuracy-trend", response_model=list[AccuracyTrendPoint])
+async def get_profile_accuracy_trend(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_accuracy_trend(db, current_user.id)
+
+
+@app.get("/profile/subject-performance", response_model=list[SubjectPerformance])
+async def get_profile_subject_performance(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.calculate_subject_performance(db, current_user.id)
+
+
+@app.get("/profile/strength-analysis", response_model=StrengthAnalysisResponse)
+async def get_profile_strength_analysis(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    return TestResultService.get_strength_analysis(db, current_user.id)
+
+
+@app.get("/profile/test-details/{test_id}", response_model=TestResultResponse)
+async def get_profile_test_details(
+    test_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    result = TestResultService.get_test_result_by_id(db, current_user.id, test_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Test result not found")
+    return result
 
 
 if __name__ == "__main__":
