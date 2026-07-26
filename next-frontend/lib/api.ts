@@ -1,39 +1,31 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
-export interface SignupPayload {
-  full_name: string;
-  email: string;
-  password: string;
+export type ApiProvider = "mistral";
+
+export function createAuthHeaders(
+  token: string,
+  headers: HeadersInit = {},
+  contentType = true
+): Headers {
+  const nextHeaders = new Headers(headers);
+
+  if (contentType && !nextHeaders.has("Content-Type")) {
+    nextHeaders.set("Content-Type", "application/json");
+  }
+  if (token) {
+    nextHeaders.set("Authorization", `Bearer ${token}`);
+  }
+
+  return nextHeaders;
 }
-
-export interface LoginPayload {
-  email: string;
-  password: string;
-}
-
-export interface AuthResponse<T = unknown> {
-  access_token: string;
-  token_type: string;
-  user: T;
-}
-
-const defaultHeaders = {
-  "Content-Type": "application/json",
-};
 
 export async function authFetch<T = unknown>(
   route: string,
-  token?: string | null,
+  token: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const headers = new Headers({
-    ...defaultHeaders,
-    ...(options.headers || {}),
-  });
-
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const headers = createAuthHeaders(token, options.headers || {}, !isFormData);
 
   const response = await fetch(route, {
     ...options,
@@ -55,22 +47,49 @@ export async function authFetch<T = unknown>(
   return response.json();
 }
 
-export async function signup(payload: SignupPayload): Promise<AuthResponse> {
-  return authFetch(`${API_BASE}/auth/signup`, null, {
+export interface ApiKeyStatus {
+  has_key: boolean;
+  provider?: string | null;
+  masked_api_key?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ApiKeyValidationResult {
+  valid: boolean;
+  message?: string | null;
+}
+
+export async function getApiKeyStatus(token: string): Promise<ApiKeyStatus> {
+  return authFetch(`${API_BASE}/api/api-key`, token);
+}
+
+export async function validateApiKey(
+  token: string,
+  provider: ApiProvider,
+  apiKey: string
+): Promise<ApiKeyValidationResult> {
+  return authFetch(`${API_BASE}/api/validate-api-key`, token, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ provider, api_key: apiKey }),
   });
 }
 
-export async function login(payload: LoginPayload): Promise<AuthResponse> {
-  return authFetch(`${API_BASE}/auth/login`, null, {
+export async function saveApiKey(
+  token: string,
+  provider: ApiProvider,
+  apiKey: string
+): Promise<ApiKeyStatus> {
+  return authFetch(`${API_BASE}/api/api-key`, token, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ provider, api_key: apiKey }),
   });
 }
 
-export async function getCurrentUser(token: string): Promise<unknown> {
-  return authFetch(`${API_BASE}/auth/me`, token);
+export async function deleteApiKey(token: string): Promise<{ message: string }> {
+  return authFetch(`${API_BASE}/api/api-key`, token, {
+    method: "DELETE",
+  });
 }
 
 // ==================== MOCK TEST RESULTS APIs ====================

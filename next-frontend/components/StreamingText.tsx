@@ -20,7 +20,7 @@ export default function StreamingText({
   }
 
   return (
-    <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
+    <p className="whitespace-pre-wrap text-[15px] leading-7">
       {content}
       {showCursor && (
         <span className="stream-cursor ml-px inline-block h-[1.1em] w-[2px] translate-y-[2px] bg-green-500 align-text-bottom" />

@@ -26,31 +26,31 @@ export default function MarkdownMessage({
   }
 
   return (
-    <div className="markdown-body text-[15px] leading-relaxed">
+    <div className="markdown-body text-[15px] leading-7">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
-            <h1 className="mb-3 mt-4 text-xl font-bold first:mt-0">{children}</h1>
+            <h1 className="mb-2 mt-4 text-lg font-bold first:mt-0">{children}</h1>
           ),
           h2: ({ children }) => (
-            <h2 className="mb-2 mt-4 text-lg font-semibold first:mt-0">{children}</h2>
+            <h2 className="mb-2 mt-4 text-[1rem] font-semibold first:mt-0">{children}</h2>
           ),
           h3: ({ children }) => (
-            <h3 className="mb-2 mt-3 text-base font-semibold first:mt-0">{children}</h3>
+            <h3 className="mb-1.5 mt-3 text-sm font-semibold first:mt-0">{children}</h3>
           ),
           p: ({ children }) => (
-            <p className="mb-3 last:mb-0">{children}</p>
+            <p className="mb-2.5 last:mb-0">{children}</p>
           ),
           ul: ({ children }) => (
-            <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
+            <ul className="mb-2.5 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
           ),
           ol: ({ children }) => (
-            <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
+            <ol className="mb-2.5 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
           ),
-          li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+          li: ({ children }) => <li className="leading-7">{children}</li>,
           blockquote: ({ children }) => (
-            <blockquote className="mb-3 border-l-4 border-blue-400 pl-4 italic text-zinc-600 dark:text-zinc-300">
+            <blockquote className="mb-2.5 border-l-4 border-blue-400 pl-4 italic text-zinc-600 dark:text-zinc-300">
               {children}
             </blockquote>
           ),
@@ -62,7 +62,7 @@ export default function MarkdownMessage({
           em: ({ children }) => <em className="italic">{children}</em>,
           hr: () => <hr className="my-4 border-zinc-200 dark:border-zinc-700" />,
           table: ({ children }) => (
-            <div className="mb-3 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+            <div className="mb-2.5 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
               <table className="min-w-full text-sm">{children}</table>
             </div>
           ),
@@ -101,10 +101,10 @@ export default function MarkdownMessage({
                   language={match[1]}
                   PreTag="div"
                   customStyle={{
-                    margin: "0.75rem 0",
+                    margin: "0.625rem 0",
                     borderRadius: "0.5rem",
                     fontSize: "0.85rem",
-                    padding: "1rem",
+                    padding: "0.875rem",
                   }}
                 >
                   {codeText}
@@ -124,7 +124,7 @@ export default function MarkdownMessage({
             }
 
             return (
-              <pre className="mb-3 overflow-x-auto rounded-lg bg-zinc-900 p-4 text-sm text-zinc-100">
+              <pre className="mb-2.5 overflow-x-auto rounded-lg bg-zinc-900 p-4 text-sm text-zinc-100">
                 <code {...props}>{codeText}</code>
               </pre>
             );

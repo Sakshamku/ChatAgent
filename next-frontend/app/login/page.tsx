@@ -1,91 +1,76 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import Link from "next/link";
-import { useAuth } from "../../contexts/AuthContext";
+import { useEffect, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function LoginPage() {
-  const { user, loading, login } = useAuth();
+  const { token, loading, login } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!loading && user) {
-      window.location.replace("/mock-test-arena");
+    if (!loading && token) {
+      router.replace("/");
     }
-  }, [loading, user]);
+  }, [loading, token, router]);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setSubmitting(true);
     setError(null);
-
     try {
       await login(email, password);
+      router.replace("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to sign in");
+    } finally {
+      setSubmitting(false);
     }
-  };
+  }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-50">
-      <div className="mx-auto flex min-h-screen max-w-4xl items-center justify-center px-4 py-16">
-        <div className="w-full rounded-3xl border border-white/10 bg-slate-900/95 p-10 shadow-2xl shadow-black/20 backdrop-blur">
-          <div className="mb-10 text-center">
-            <p className="text-sm uppercase tracking-[0.4em] text-sky-300">Student Portal</p>
-            <h1 className="mt-4 text-4xl font-semibold">Sign in to access Mock Test Arena</h1>
-            <p className="mt-3 text-slate-400">
-              Secure access for your mock exams, analytics, and personalized practice.
-            </p>
-          </div>
-
-          <form className="space-y-6" onSubmit={handleSubmit}>
-            <label className="block">
-              <span className="text-sm font-medium text-slate-200">Email</span>
-              <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-                className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none transition focus:border-sky-500"
-              />
-            </label>
-
-            <label className="block">
-              <span className="text-sm font-medium text-slate-200">Password</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-                className="mt-2 w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-slate-100 outline-none transition focus:border-sky-500"
-              />
-            </label>
-
-            {error ? (
-              <div className="rounded-2xl bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-                {error}
-              </div>
-            ) : null}
-
-            <button
-              type="submit"
-              className="w-full rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-500 px-5 py-3 text-sm font-semibold text-white transition hover:brightness-110"
-            >
-              Sign In
-            </button>
-          </form>
-
-          <div className="mt-8 text-center text-sm text-slate-400">
-            <p>
-              New here?{' '}
-              <Link href="/signup" className="font-semibold text-slate-100 hover:text-white">
-                Create an account
-              </Link>
-            </p>
-          </div>
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 dark:bg-zinc-950">
+      <form onSubmit={handleSubmit} className="w-full max-w-md space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue-600 dark:text-blue-400">Sign in</p>
+          <h1 className="mt-2 text-2xl font-semibold">Welcome back</h1>
         </div>
-      </div>
+        <label className="block space-y-2 text-sm">
+          <span>Email</span>
+          <input
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
+            required
+          />
+        </label>
+        <label className="block space-y-2 text-sm">
+          <span>Password</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950"
+            required
+          />
+        </label>
+        {error ? <p className="text-sm text-rose-600 dark:text-rose-300">{error}</p> : null}
+        <button
+          type="submit"
+          disabled={submitting}
+          className="w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+        >
+          {submitting ? "Signing in..." : "Sign in"}
+        </button>
+        <p className="text-sm text-slate-600 dark:text-zinc-400">
+          No account yet? <a href="/signup" className="font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400">Create one</a>
+        </p>
+      </form>
     </main>
   );
 }

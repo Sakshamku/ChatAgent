@@ -18,8 +18,8 @@ import {
   Timer,
   XCircle,
 } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 import { API_BASE, authFetch, submitTestResult } from "../lib/api";
-import { useAuth } from "../contexts/AuthContext";
 
 type Arena = "dsa" | "aptitude" | "verbal" | "reasoning" | "programming";
 type McqArena = Exclude<Arena, "dsa">;

@@ -28,10 +28,12 @@ from backend.database import (
     create_conversation, save_message, load_conversation,
     get_all_conversations, delete_conversation, save_document_metadata,
     get_document_metadata, update_conversation_title, get_conversation_title,
+    get_conversation_owner,
     get_coding_profiles, get_latest_coding_stats, get_topic_stats,
     save_mock_interview_question, get_latest_mock_interview,
     save_mock_interview_answer
 )
+from backend.auth import SessionLocal, get_user_api_key, decrypt_api_key
 from backend.utils import (
     generate_thread_id, generate_chat_title, convert_langchain_messages_to_dict,
     convert_dict_to_langchain_messages, get_message_role, sanitize_filename
@@ -95,13 +97,21 @@ class TfidfRetriever:
 # Cached LLM
 # =========================================================
 
-@lru_cache(maxsize=1)
-def get_llm():
+def get_llm(api_key: str):
     return ChatMistralAI(
         model="mistral-small-latest",
-        api_key=os.getenv("MISTRAL_API_KEY"),
+        api_key=api_key,
         streaming=True,
     )
+
+
+def get_user_llm(user_id: str):
+    with SessionLocal() as db:
+        api_key_record = get_user_api_key(db, user_id, "mistral")
+        if not api_key_record:
+            raise RuntimeError("Please configure your Mistral API key before using chat.")
+        api_key = decrypt_api_key(api_key_record.encrypted_api_key)
+    return get_llm(api_key)
 
 # =========================================================
 # Cached Embeddings
@@ -185,11 +195,11 @@ def _thread_fallback_retriever_path(thread_id: str) -> str:
     return os.path.join(_thread_vector_store_path(thread_id), FALLBACK_RETRIEVER_FILE)
 
 
-def _format_pdf_context(thread_id: Optional[str], query: str) -> str:
+def _format_pdf_context(thread_id: Optional[str], query: str, user_id: Optional[str] = None) -> str:
     if not thread_id:
         return ""
 
-    metadata = thread_document_metadata(str(thread_id))
+    metadata = thread_document_metadata(str(thread_id), user_id)
     if not metadata:
         return ""
 
@@ -232,7 +242,8 @@ def _format_pdf_context(thread_id: Optional[str], query: str) -> str:
 def ingest_pdf(
     file_bytes: bytes,
     thread_id: str,
-    filename: Optional[str] = None
+    filename: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
     """
     Lazy-load heavy libraries only when needed.
@@ -318,7 +329,8 @@ def ingest_pdf(
             filename=safe_filename,
             chunks=len(chunks),
             pages=len(docs),
-            file_size=len(file_bytes)
+            file_size=len(file_bytes),
+            user_id=user_id or "legacy_user",
         )
 
         return metadata
@@ -717,8 +729,6 @@ tools = [
     list_connected_profiles,
 ]
 
-llm_with_tools = get_llm().bind_tools(tools)
-
 # =========================================================
 # Graph State
 # =========================================================
@@ -739,6 +749,9 @@ def chat_node(state: ChatState, config=None):
             config.get("configurable", {})
             .get("thread_id")
         )
+    owner_id = get_conversation_owner(thread_id) if thread_id else None
+    if not owner_id:
+        owner_id = "legacy_user"
 
     last_user_content = ""
 
@@ -751,15 +764,16 @@ def chat_node(state: ChatState, config=None):
             last_message = messages[-1]
             if isinstance(last_message, HumanMessage):
                 last_user_content = str(last_message.content)
-                save_message(thread_id, "user", last_message.content)
+                save_message(thread_id, "user", last_message.content, owner_id)
                 
                 # Generate and save title if this is the first message
-                existing_title = get_conversation_title(thread_id)
+                existing_title = get_conversation_title(thread_id, owner_id)
                 if not existing_title:
                     title = generate_chat_title(last_message.content)
-                    create_conversation(thread_id, title)
+                    create_conversation(thread_id, title, owner_id)
 
-    pdf_context = _format_pdf_context(thread_id, last_user_content)
+    pdf_context = _format_pdf_context(thread_id, last_user_content, owner_id)
+    llm_with_tools = get_user_llm(owner_id).bind_tools(tools)
 
     system_message = SystemMessage(
         content=(
@@ -819,7 +833,7 @@ def chat_node(state: ChatState, config=None):
     
     # Save assistant response to database
     if thread_id and hasattr(response, 'content'):
-        save_message(thread_id, "assistant", response.content)
+        save_message(thread_id, "assistant", response.content, owner_id)
 
     return {
         "messages": [response]
@@ -867,12 +881,12 @@ def retrieve_all_threads():
     conversations = get_all_conversations()
     return [conv["thread_id"] for conv in conversations]
 
-def thread_document_metadata(thread_id: str):
+def thread_document_metadata(thread_id: str, user_id: Optional[str] = None):
     """
     Get document metadata from database or memory store.
     """
     # First try database
-    db_metadata = get_document_metadata(thread_id)
+    db_metadata = get_document_metadata(thread_id, user_id)
     if db_metadata:
         return {
             "filename": db_metadata["filename"],
@@ -883,25 +897,25 @@ def thread_document_metadata(thread_id: str):
     # Fallback to memory store
     return _THREAD_METADATA.get(str(thread_id), {})
 
-def get_conversation_messages(thread_id: str):
+def get_conversation_messages(thread_id: str, user_id: Optional[str] = None):
     """
     Load conversation messages from database.
     """
-    db_messages = load_conversation(thread_id)
+    db_messages = load_conversation(thread_id, user_id)
     return convert_dict_to_langchain_messages(db_messages)
 
-def get_all_conversations_with_metadata():
+def get_all_conversations_with_metadata(user_id: Optional[str] = None):
     """
     Get all conversations with full metadata for frontend.
     """
-    conversations = get_all_conversations()
+    conversations = get_all_conversations(user_id)
     
     result = []
     for conv in conversations:
         thread_id = conv["thread_id"]
         
         # Add document metadata
-        doc_meta = get_document_metadata(thread_id)
+        doc_meta = get_document_metadata(thread_id, user_id)
         
         result.append({
             **conv,
@@ -911,7 +925,7 @@ def get_all_conversations_with_metadata():
     
     return result
 
-def delete_thread(thread_id: str) -> bool:
+def delete_thread(thread_id: str, user_id: Optional[str] = None) -> bool:
     """
     Delete a thread and all its data.
     """
@@ -920,12 +934,12 @@ def delete_thread(thread_id: str) -> bool:
     _THREAD_METADATA.pop(str(thread_id), None)
     
     # Delete from database
-    return delete_conversation(thread_id)
+    return delete_conversation(thread_id, user_id)
 
-def search_conversations(query: str):
+def search_conversations(query: str, user_id: Optional[str] = None):
     """
     Search conversations by title or content.
     """
     from backend.database import search_conversations as db_search
-    return db_search(query)
+    return db_search(query, user_id)
 

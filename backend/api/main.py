@@ -6,6 +6,7 @@ import json
 import random
 import threading
 from datetime import date
+from pathlib import Path
 from typing import AsyncGenerator
 
 import uvicorn
@@ -15,6 +16,9 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, AIMessageChunk
 
 from backend.auth import (
+    ApiKeyStatusResponse,
+    ApiKeyUpsertRequest,
+    ApiKeyValidationResponse,
     AuthResponse,
     LoginRequest,
     SignupRequest,
@@ -22,10 +26,14 @@ from backend.auth import (
     authenticate_user,
     create_access_token,
     create_user,
+    delete_user_api_key,
     get_current_user,
     get_db,
+    get_user_api_key_status,
     Base,
     engine,
+    save_user_api_key,
+    validate_mistral_api_key,
 )
 from backend.models import TestResult, SubjectResult, ensure_result_schema
 from backend.schemas import (
@@ -53,6 +61,7 @@ from backend.coding_platforms.leetcode import fetch_leetcode_contests, fetch_lee
 from backend.database import (
     create_conversation,
     create_mock_test_attempt,
+    get_conversation_owner,
     get_conversation_title,
     get_mock_test_analytics,
     get_mock_test_attempt,
@@ -87,6 +96,15 @@ Base.metadata.create_all(bind=engine)
 ensure_result_schema(engine)
 
 _DONE = object()
+
+
+def _require_user_api_key(current_user, db, provider: str = "mistral") -> None:
+    status = get_user_api_key_status(db, current_user.id, provider)
+    if not status.has_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Please configure your Mistral API key before using the chatbot.",
+        )
 
 MOCK_TEST_META = {
     "dsa": {
@@ -660,28 +678,39 @@ async def stream_chat(message: str, thread_id: str) -> AsyncGenerator[str, None]
 
 
 @app.post("/conversations")
-async def create_conv():
+async def create_conv(current_user=Depends(get_current_user)):
     thread_id = generate_thread_id()
-    create_conversation(thread_id, "Untitled")
+    create_conversation(thread_id, "Untitled", current_user.id)
     return {"thread_id": thread_id}
 
 
 @app.post("/conversations/{thread_id}/messages")
-async def send_message(thread_id: str, payload: dict = None):
+async def send_message(
+    thread_id: str,
+    payload: dict = None,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     if payload is None:
         payload = {}
     message = payload.get("message", "")
     if not message:
         raise HTTPException(status_code=400, detail="message required")
 
+    _require_user_api_key(current_user, db)
+
+    owner_id = get_conversation_owner(thread_id)
+    if owner_id and owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Conversation does not belong to the current user")
+
     # Ensure direct API callers do not lose persistence when they post to a
     # thread before creating it through POST /conversations.
-    existing_title = get_conversation_title(thread_id)
+    existing_title = get_conversation_title(thread_id, current_user.id)
     if existing_title is None:
-        create_conversation(thread_id, generate_chat_title(message))
-    elif existing_title == "Untitled" and not load_conversation(thread_id):
+        create_conversation(thread_id, generate_chat_title(message), current_user.id)
+    elif existing_title == "Untitled" and not load_conversation(thread_id, current_user.id):
         generated_title = generate_chat_title(message)
-        update_conversation_title(thread_id, generated_title)
+        update_conversation_title(thread_id, generated_title, current_user.id)
 
     return StreamingResponse(
         stream_chat(message, thread_id),
@@ -695,13 +724,15 @@ async def send_message(thread_id: str, payload: dict = None):
 
 
 @app.get("/conversations")
-async def list_convs():
-    return get_all_conversations_with_metadata()
+async def list_convs(current_user=Depends(get_current_user)):
+    return get_all_conversations_with_metadata(current_user.id)
 
 
 @app.delete("/conversations/{thread_id}")
-async def delete_conv(thread_id: str):
-    result = delete_thread(thread_id)
+async def delete_conv(thread_id: str, current_user=Depends(get_current_user)):
+    result = delete_thread(thread_id, current_user.id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     return {"success": result}
 
 
@@ -710,14 +741,24 @@ async def upload_pdf(
     file: UploadFile = File(...),
     thread_id: str = Form(...),
     filename: str = Form(None),
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
 ):
     filename = filename or file.filename
     if not filename or not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported")
 
+    _require_user_api_key(current_user, db)
+
+    owner_id = get_conversation_owner(thread_id)
+    if owner_id and owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Conversation does not belong to the current user")
+    if not owner_id:
+        create_conversation(thread_id, Path(filename).stem or "Uploaded PDF", current_user.id)
+
     file_bytes = await file.read()
     try:
-        return ingest_pdf(file_bytes, thread_id, filename)
+        return ingest_pdf(file_bytes, thread_id, filename, current_user.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -725,7 +766,10 @@ async def upload_pdf(
 
 
 @app.get("/files")
-async def list_files(thread_id: str = Query(...)):
+async def list_files(thread_id: str = Query(...), current_user=Depends(get_current_user)):
+    owner_id = get_conversation_owner(thread_id)
+    if owner_id and owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     files = list_workspace_files(thread_id)
     if not files:
         return {"files": [], "message": "No files uploaded yet"}
@@ -733,18 +777,24 @@ async def list_files(thread_id: str = Query(...)):
 
 
 @app.get("/search")
-async def search(query: str):
-    return search_conversations(query)
+async def search(query: str, current_user=Depends(get_current_user)):
+    return search_conversations(query, current_user.id)
 
 
 @app.get("/metadata/{thread_id}")
-async def doc_meta(thread_id: str):
-    return thread_document_metadata(thread_id)
+async def doc_meta(thread_id: str, current_user=Depends(get_current_user)):
+    owner_id = get_conversation_owner(thread_id)
+    if owner_id and owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return thread_document_metadata(thread_id, current_user.id)
 
 
 @app.get("/messages/{thread_id}")
-async def get_msgs(thread_id: str):
-    return load_conversation(thread_id)
+async def get_msgs(thread_id: str, current_user=Depends(get_current_user)):
+    owner_id = get_conversation_owner(thread_id)
+    if owner_id and owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return load_conversation(thread_id, current_user.id)
 
 
 @app.post("/auth/signup", response_model=AuthResponse)
@@ -771,6 +821,47 @@ async def login(payload: LoginRequest, db=Depends(get_db)):
 @app.get("/auth/me", response_model=UserRead)
 async def get_me(current_user=Depends(get_current_user)):
     return current_user
+
+
+@app.post("/api/validate-api-key", response_model=ApiKeyValidationResponse)
+async def validate_api_key(payload: ApiKeyUpsertRequest, current_user=Depends(get_current_user)):
+    provider = payload.provider.lower().strip()
+    if provider != "mistral":
+        return ApiKeyValidationResponse(valid=False, message="Unsupported provider")
+
+    valid, message = validate_mistral_api_key(payload.api_key)
+    return ApiKeyValidationResponse(valid=valid, message=None if valid else message)
+
+
+@app.get("/api/api-key", response_model=ApiKeyStatusResponse)
+async def get_api_key(current_user=Depends(get_current_user), db=Depends(get_db)):
+    return get_user_api_key_status(db, current_user.id, "mistral")
+
+
+@app.post("/api/api-key", response_model=ApiKeyStatusResponse)
+async def save_api_key(
+    payload: ApiKeyUpsertRequest,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    provider = payload.provider.lower().strip()
+    if provider != "mistral":
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+
+    valid, _message = validate_mistral_api_key(payload.api_key)
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid API Key")
+
+    save_user_api_key(db, current_user.id, provider, payload.api_key)
+    return get_user_api_key_status(db, current_user.id, provider)
+
+
+@app.delete("/api/api-key")
+async def delete_api_key(current_user=Depends(get_current_user), db=Depends(get_db)):
+    deleted = delete_user_api_key(db, current_user.id, "mistral")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"message": "API key deleted successfully"}
 
 
 @app.get("/mock-tests/catalog")

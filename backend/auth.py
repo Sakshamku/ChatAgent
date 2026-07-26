@@ -1,17 +1,21 @@
 """
 Authentication utilities and SQLAlchemy user model for ChatAgent.
 """
+import hashlib
 import os
 import uuid
+from base64 import urlsafe_b64encode
 from datetime import datetime, timedelta
 from typing import Generator, Optional
 
 import bcrypt
 import jwt
+import requests
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import Column, DateTime, String, Text, create_engine, func, inspect, text
+from pydantic import BaseModel, EmailStr, model_validator
+from cryptography.fernet import Fernet, InvalidToken
+from sqlalchemy import Column, DateTime, String, Text, ForeignKey, create_engine, func, inspect, text, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
@@ -44,6 +48,20 @@ class User(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_api_keys_user_provider"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    provider = Column(String(50), nullable=False, index=True)
+    encrypted_api_key = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class UserCreate(BaseModel):
     full_name: str
     email: EmailStr
@@ -54,6 +72,13 @@ class SignupRequest(BaseModel):
     full_name: str
     email: EmailStr
     password: str
+    confirm_password: str
+
+    @model_validator(mode="after")
+    def validate_passwords(self) -> "SignupRequest":
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match")
+        return self
 
 
 class UserRead(BaseModel):
@@ -75,6 +100,129 @@ class AuthResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserRead
+
+
+class ApiKeyUpsertRequest(BaseModel):
+    provider: str = "mistral"
+    api_key: str
+
+
+class ApiKeyStatusResponse(BaseModel):
+    has_key: bool
+    provider: Optional[str] = None
+    masked_api_key: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ApiKeyValidationResponse(BaseModel):
+    valid: bool
+    message: Optional[str] = None
+
+
+def _derive_fernet_key() -> bytes:
+    configured_key = os.getenv("ENCRYPTION_KEY")
+    if configured_key:
+        return configured_key.encode("utf-8")
+
+    fallback_key = os.getenv("SECRET_KEY") or "chatagent-default-secret"
+    digest = hashlib.sha256(fallback_key.encode("utf-8")).digest()
+    return urlsafe_b64encode(digest)
+
+
+def get_fernet() -> Fernet:
+    try:
+        return Fernet(_derive_fernet_key())
+    except Exception as exc:
+        raise RuntimeError("ENCRYPTION_KEY is invalid") from exc
+
+
+def encrypt_api_key(api_key: str) -> str:
+    return get_fernet().encrypt(api_key.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_api_key(encrypted_api_key: str) -> str:
+    try:
+        return get_fernet().decrypt(encrypted_api_key.encode("utf-8")).decode("utf-8")
+    except InvalidToken as exc:
+        raise RuntimeError("Unable to decrypt API key") from exc
+
+
+def mask_api_key(api_key: str) -> str:
+    api_key = api_key.strip()
+    if len(api_key) <= 4:
+        return "*" * max(4, len(api_key))
+    return f"{'*' * max(8, len(api_key) - 4)}{api_key[-4:]}"
+
+
+def get_user_api_key(db: Session, user_id: str, provider: str = "mistral") -> Optional[ApiKey]:
+    return (
+        db.query(ApiKey)
+        .filter(ApiKey.user_id == user_id, ApiKey.provider == provider.lower().strip())
+        .first()
+    )
+
+
+def get_user_api_key_status(db: Session, user_id: str, provider: str = "mistral") -> ApiKeyStatusResponse:
+    record = get_user_api_key(db, user_id, provider)
+    if not record:
+        return ApiKeyStatusResponse(has_key=False, provider=provider.lower().strip())
+    try:
+        decrypted = decrypt_api_key(record.encrypted_api_key)
+    except Exception:
+        return ApiKeyStatusResponse(has_key=False, provider=provider.lower().strip())
+    return ApiKeyStatusResponse(
+        has_key=True,
+        provider=record.provider,
+        masked_api_key=mask_api_key(decrypted),
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def save_user_api_key(db: Session, user_id: str, provider: str, api_key: str) -> ApiKey:
+    provider = provider.lower().strip()
+    encrypted = encrypt_api_key(api_key.strip())
+    record = get_user_api_key(db, user_id, provider)
+    if record:
+        record.encrypted_api_key = encrypted
+        db.add(record)
+    else:
+        record = ApiKey(
+            user_id=user_id,
+            provider=provider,
+            encrypted_api_key=encrypted,
+        )
+        db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def delete_user_api_key(db: Session, user_id: str, provider: str = "mistral") -> bool:
+    record = get_user_api_key(db, user_id, provider)
+    if not record:
+        return False
+    db.delete(record)
+    db.commit()
+    return True
+
+
+def validate_mistral_api_key(api_key: str) -> tuple[bool, str]:
+    api_key = api_key.strip()
+    if not api_key:
+        return False, "Invalid API Key"
+    try:
+        response = requests.get(
+            "https://api.mistral.ai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if response.ok:
+            return True, "Valid API Key"
+        return False, "Invalid API Key"
+    except Exception:
+        return False, "Invalid API Key"
 
 
 def init_auth_db() -> None:

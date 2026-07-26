@@ -9,6 +9,7 @@ export async function POST(
 ) {
   const { threadId } = await context.params;
   const body = await request.json();
+  const authorization = request.headers.get("authorization");
 
   const upstream = await fetch(
     `${BACKEND_URL}/conversations/${threadId}/messages`,
@@ -17,6 +18,7 @@ export async function POST(
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
+        ...(authorization ? { Authorization: authorization } : {}),
       },
       body: JSON.stringify(body),
       cache: "no-store",

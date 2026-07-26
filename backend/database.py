@@ -46,6 +46,7 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS conversations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 thread_id TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy_user',
                 title TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -57,6 +58,7 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 thread_id TEXT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy_user',
                 role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
                 content TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -69,6 +71,7 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 thread_id TEXT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy_user',
                 filename TEXT NOT NULL,
                 chunks INTEGER NOT NULL,
                 pages INTEGER NOT NULL,
@@ -77,12 +80,30 @@ def initialize_database():
                 FOREIGN KEY (thread_id) REFERENCES conversations(thread_id) ON DELETE CASCADE
             )
         """)
-        
+        # Schema migrations for existing SQLite databases
+        cursor.execute("PRAGMA table_info(conversations)")
+        conversation_columns = {row[1] for row in cursor.fetchall()}
+        if "user_id" not in conversation_columns:
+            cursor.execute("ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user'")
+
+        cursor.execute("PRAGMA table_info(messages)")
+        message_columns = {row[1] for row in cursor.fetchall()}
+        if "user_id" not in message_columns:
+            cursor.execute("ALTER TABLE messages ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user'")
+
+        cursor.execute("PRAGMA table_info(documents)")
+        document_columns = {row[1] for row in cursor.fetchall()}
+        if "user_id" not in document_columns:
+            cursor.execute("ALTER TABLE documents ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user'")
+
         # Create indexes for performance
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_thread_id ON documents(thread_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)")
         
         # Create trigger to auto-update updated_at
         cursor.execute("""
@@ -218,88 +239,134 @@ def initialize_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mock_test_attempts_user ON mock_test_attempts(user_id, test_type, started_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mock_test_questions_attempt ON mock_test_questions(attempt_id)")
 
-def create_conversation(thread_id: str, title: str) -> bool:
+def get_conversation_owner(thread_id: str) -> Optional[str]:
+    """Return the owning user for a conversation thread."""
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                "SELECT user_id FROM conversations WHERE thread_id = ?",
+                (thread_id,),
+            )
+            row = cursor.fetchone()
+            return row["user_id"] if row else None
+    except Exception as e:
+        print(f"Error getting conversation owner: {e}")
+        return None
+
+
+def create_conversation(thread_id: str, title: str, user_id: str = "legacy_user") -> bool:
     """Create a new conversation"""
     try:
         with get_db_cursor() as cursor:
             cursor.execute(
-                "INSERT OR IGNORE INTO conversations (thread_id, title) VALUES (?, ?)",
-                (thread_id, title)
+                "INSERT OR IGNORE INTO conversations (thread_id, user_id, title) VALUES (?, ?, ?)",
+                (thread_id, user_id, title)
             )
             return cursor.rowcount > 0
     except Exception as e:
         print(f"Error creating conversation: {e}")
         return False
 
-def save_message(thread_id: str, role: str, content: str) -> bool:
+def save_message(thread_id: str, role: str, content: str, user_id: str = "legacy_user") -> bool:
     """Save a message to the database"""
     try:
         with get_db_cursor() as cursor:
             cursor.execute(
-                "INSERT INTO messages (thread_id, role, content) VALUES (?, ?, ?)",
-                (thread_id, role, content)
+                "INSERT INTO messages (thread_id, user_id, role, content) VALUES (?, ?, ?, ?)",
+                (thread_id, user_id, role, content)
             )
             return cursor.rowcount > 0
     except Exception as e:
         print(f"Error saving message: {e}")
         return False
 
-def load_conversation(thread_id: str) -> List[Dict[str, Any]]:
+def load_conversation(thread_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Load all messages for a conversation"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute(
-                "SELECT role, content, timestamp FROM messages WHERE thread_id = ? ORDER BY timestamp ASC",
-                (thread_id,)
-            )
+            query = """
+                SELECT m.role, m.content, m.timestamp
+                FROM messages m
+                JOIN conversations c ON c.thread_id = m.thread_id
+                WHERE m.thread_id = ?
+            """
+            params: list[Any] = [thread_id]
+            if user_id is not None:
+                query += " AND c.user_id = ?"
+                params.append(user_id)
+            query += " ORDER BY m.timestamp ASC"
+            cursor.execute(query, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         print(f"Error loading conversation: {e}")
         return []
 
-def get_all_conversations() -> List[Dict[str, Any]]:
+def get_all_conversations(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Get all conversations ordered by most recent"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("""
-                SELECT thread_id, title, created_at, updated_at,
+            query = """
+                SELECT thread_id, user_id, title, created_at, updated_at,
                        (SELECT COUNT(*) FROM messages WHERE thread_id = conversations.thread_id) as message_count
-                FROM conversations 
-                ORDER BY updated_at DESC
-            """)
+                FROM conversations
+            """
+            params: tuple[Any, ...] = ()
+            if user_id is not None:
+                query += " WHERE user_id = ?"
+                params = (user_id,)
+            query += " ORDER BY updated_at DESC"
+            cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         print(f"Error getting conversations: {e}")
         return []
 
-def search_conversations(query: str) -> List[Dict[str, Any]]:
+def search_conversations(query: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Search conversations by title or content"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("""
-                SELECT DISTINCT c.thread_id, c.title, c.created_at, c.updated_at,
+            sql = """
+                SELECT DISTINCT c.thread_id, c.user_id, c.title, c.created_at, c.updated_at,
                        (SELECT COUNT(*) FROM messages WHERE thread_id = c.thread_id) as message_count
                 FROM conversations c
                 LEFT JOIN messages m ON c.thread_id = m.thread_id
-                WHERE c.title LIKE ? OR m.content LIKE ?
-                ORDER BY c.updated_at DESC
-            """, (f"%{query}%", f"%{query}%"))
+                WHERE (c.title LIKE ? OR m.content LIKE ?)
+            """
+            params: list[Any] = [f"%{query}%", f"%{query}%"]
+            if user_id is not None:
+                sql += " AND c.user_id = ?"
+                params.append(user_id)
+            sql += " ORDER BY c.updated_at DESC"
+            cursor.execute(sql, tuple(params))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
         print(f"Error searching conversations: {e}")
         return []
 
-def delete_conversation(thread_id: str) -> bool:
+def delete_conversation(thread_id: str, user_id: Optional[str] = None) -> bool:
     """Delete a conversation and all related data"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("DELETE FROM conversations WHERE thread_id = ?", (thread_id,))
+            if user_id is None:
+                cursor.execute("DELETE FROM conversations WHERE thread_id = ?", (thread_id,))
+            else:
+                cursor.execute(
+                    "DELETE FROM conversations WHERE thread_id = ? AND user_id = ?",
+                    (thread_id, user_id),
+                )
             return cursor.rowcount > 0
     except Exception as e:
         print(f"Error deleting conversation: {e}")
         return False
 
-def save_document_metadata(thread_id: str, filename: str, chunks: int, pages: int, file_size: int = None) -> bool:
+def save_document_metadata(
+    thread_id: str,
+    filename: str,
+    chunks: int,
+    pages: int,
+    file_size: int = None,
+    user_id: str = "legacy_user",
+) -> bool:
     """Save document metadata"""
     try:
         with get_db_cursor() as cursor:
@@ -311,77 +378,119 @@ def save_document_metadata(thread_id: str, filename: str, chunks: int, pages: in
             if existing:
                 cursor.execute("""
                     UPDATE documents
-                    SET filename = ?, chunks = ?, pages = ?, file_size = ?,
+                    SET user_id = ?, filename = ?, chunks = ?, pages = ?, file_size = ?,
                         uploaded_at = CURRENT_TIMESTAMP
                     WHERE thread_id = ?
-                """, (filename, chunks, pages, file_size, thread_id))
+                """, (user_id, filename, chunks, pages, file_size, thread_id))
             else:
                 cursor.execute("""
-                    INSERT INTO documents (thread_id, filename, chunks, pages, file_size)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (thread_id, filename, chunks, pages, file_size))
+                    INSERT INTO documents (thread_id, user_id, filename, chunks, pages, file_size)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (thread_id, user_id, filename, chunks, pages, file_size))
             return cursor.rowcount > 0
     except Exception as e:
         print(f"Error saving document metadata: {e}")
         return False
 
-def get_document_metadata(thread_id: str) -> Optional[Dict[str, Any]]:
+def get_document_metadata(thread_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Get document metadata for a thread"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute(
-                "SELECT filename, chunks, pages, file_size, uploaded_at FROM documents WHERE thread_id = ?",
-                (thread_id,)
-            )
+            query = """
+                SELECT filename, chunks, pages, file_size, uploaded_at
+                FROM documents
+                WHERE thread_id = ?
+            """
+            params: list[Any] = [thread_id]
+            if user_id is not None:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            cursor.execute(query, tuple(params))
             row = cursor.fetchone()
             return dict(row) if row else None
     except Exception as e:
         print(f"Error getting document metadata: {e}")
         return None
 
-def update_conversation_title(thread_id: str, title: str) -> bool:
+def update_conversation_title(thread_id: str, title: str, user_id: Optional[str] = None) -> bool:
     """Update conversation title"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute(
-                "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE thread_id = ?",
-                (title, thread_id)
-            )
+            if user_id is None:
+                cursor.execute(
+                    "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE thread_id = ?",
+                    (title, thread_id)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE thread_id = ? AND user_id = ?",
+                    (title, thread_id, user_id)
+                )
             return cursor.rowcount > 0
     except Exception as e:
         print(f"Error updating conversation title: {e}")
         return False
 
-def get_conversation_title(thread_id: str) -> Optional[str]:
+def get_conversation_title(thread_id: str, user_id: Optional[str] = None) -> Optional[str]:
     """Get conversation title"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT title FROM conversations WHERE thread_id = ?", (thread_id,))
+            if user_id is None:
+                cursor.execute("SELECT title FROM conversations WHERE thread_id = ?", (thread_id,))
+            else:
+                cursor.execute(
+                    "SELECT title FROM conversations WHERE thread_id = ? AND user_id = ?",
+                    (thread_id, user_id),
+                )
             row = cursor.fetchone()
             return row['title'] if row else None
     except Exception as e:
         print(f"Error getting conversation title: {e}")
         return None
 
-def get_message_count(thread_id: str) -> int:
+def get_message_count(thread_id: str, user_id: Optional[str] = None) -> int:
     """Get message count for a conversation"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) as count FROM messages WHERE thread_id = ?", (thread_id,))
+            if user_id is None:
+                cursor.execute("SELECT COUNT(*) as count FROM messages WHERE thread_id = ?", (thread_id,))
+            else:
+                cursor.execute(
+                    """
+                        SELECT COUNT(*) as count
+                        FROM messages m
+                        JOIN conversations c ON c.thread_id = m.thread_id
+                        WHERE m.thread_id = ? AND c.user_id = ?
+                    """,
+                    (thread_id, user_id),
+                )
             row = cursor.fetchone()
             return row['count'] if row else 0
     except Exception as e:
         print(f"Error getting message count: {e}")
         return 0
 
-def get_last_message(thread_id: str) -> Optional[Dict[str, Any]]:
+def get_last_message(thread_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Get the last message in a conversation"""
     try:
         with get_db_cursor() as cursor:
-            cursor.execute(
-                "SELECT role, content, timestamp FROM messages WHERE thread_id = ? ORDER BY timestamp DESC LIMIT 1",
-                (thread_id,)
-            )
+            if user_id is None:
+                cursor.execute(
+                    "SELECT role, content, timestamp FROM messages WHERE thread_id = ? ORDER BY timestamp DESC LIMIT 1",
+                    (thread_id,)
+                )
+            else:
+                cursor.execute(
+                    """
+                        SELECT m.role, m.content, m.timestamp
+                        FROM messages m
+                        JOIN conversations c ON c.thread_id = m.thread_id
+                        WHERE m.thread_id = ? AND c.user_id = ?
+                        ORDER BY m.timestamp DESC
+                        LIMIT 1
+                    """,
+                    (thread_id, user_id),
+                )
             row = cursor.fetchone()
             return dict(row) if row else None
     except Exception as e:

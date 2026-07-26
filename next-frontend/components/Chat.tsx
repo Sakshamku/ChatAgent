@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   FileText,
   Loader2,
@@ -8,8 +8,9 @@ import {
   SendHorizontal,
   X,
 } from "lucide-react";
-import { API_BASE } from "../lib/api";
+import { API_BASE, authFetch, createAuthHeaders } from "../lib/api";
 import { useTypewriter } from "../hooks/useTypewriter";
+import { useAuth } from "@/contexts/AuthContext";
 import MarkdownMessage from "./MarkdownMessage";
 import StreamingText from "./StreamingText";
 
@@ -49,6 +50,7 @@ function parseSseChunk(raw: string): string | null {
 }
 
 export default function Chat({ threadId }: { threadId: string }) {
+  const { token } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -62,21 +64,37 @@ export default function Chat({ threadId }: { threadId: string }) {
   );
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fullContentRef = useRef("");
   const typewriter = useTypewriter();
+  const composerCompact = isStreaming;
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, typewriter.displayed, isStreaming]);
 
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "auto";
+    const maxHeight = 200;
+    const nextHeight = Math.min(maxHeight, textarea.scrollHeight);
+
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [input]);
+
   useEffect(() => {
     async function fetchMessages() {
       if (!threadId) return;
       try {
-        const res = await fetch(`${API_BASE}/messages/${threadId}`);
-        if (!res.ok) throw new Error("Failed to load messages");
-        const data: ApiMessage[] = await res.json();
+        if (!token) return;
+        const data: ApiMessage[] = await authFetch(
+          `${API_BASE}/messages/${threadId}`,
+          token
+        );
         const loaded = data.map((msg, idx) => ({
           role:
             msg.role === "assistant"
@@ -94,7 +112,7 @@ export default function Chat({ threadId }: { threadId: string }) {
     }
 
     fetchMessages();
-  }, [threadId]);
+  }, [threadId, token]);
 
   useEffect(() => {
     async function fetchMetadata() {
@@ -103,9 +121,11 @@ export default function Chat({ threadId }: { threadId: string }) {
       setUploadError(null);
 
       try {
-        const res = await fetch(`${API_BASE}/metadata/${threadId}`);
-        if (!res.ok) return;
-        const data = await res.json();
+        if (!token) return;
+        const data = await authFetch<{ filename?: string; documents?: number; chunks?: number }>(
+          `${API_BASE}/metadata/${threadId}`,
+          token
+        );
         if (data?.filename) {
           setUploadedFiles([
             {
@@ -121,7 +141,7 @@ export default function Chat({ threadId }: { threadId: string }) {
     }
 
     fetchMetadata();
-  }, [threadId]);
+  }, [threadId, token]);
 
   const sendMessage = async (overrideMessage?: string) => {
     const messageText = (overrideMessage ?? input).trim();
@@ -150,14 +170,13 @@ export default function Chat({ threadId }: { threadId: string }) {
     ]);
 
     try {
+      if (!token) throw new Error("Missing authentication token");
+
       const response = await fetch(
         `${API_BASE}/conversations/${threadId}/messages`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          },
+          headers: createAuthHeaders(token, { Accept: "text/event-stream" }, true),
           body: JSON.stringify({ message: userMsg.content }),
           cache: "no-store",
         }
@@ -245,6 +264,10 @@ export default function Chat({ threadId }: { threadId: string }) {
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
     if (!event.target.files || !threadId) return;
+    if (!token) {
+      setUploadError("Missing authentication token.");
+      return;
+    }
 
     const files = Array.from(event.target.files);
     if (files.length === 0) return;
@@ -280,6 +303,7 @@ export default function Chat({ threadId }: { threadId: string }) {
 
         const response = await fetch(`${API_BASE}/pdf`, {
           method: "POST",
+          headers: createAuthHeaders(token, {}, false),
           body: formData,
         });
 
@@ -338,7 +362,7 @@ export default function Chat({ threadId }: { threadId: string }) {
           </div>
         )}
 
-        <div className="mx-auto flex max-w-3xl flex-col gap-6">
+        <div className="mx-auto flex max-w-3xl flex-col gap-4">
           {messages.map((msg) => {
             const isAssistant = msg.role === "assistant";
             const isActiveStream = isStreaming && msg.id === streamingMessageId;
@@ -346,10 +370,10 @@ export default function Chat({ threadId }: { threadId: string }) {
             return (
               <div
                 key={msg.id}
-                className={`flex gap-3 ${isAssistant ? "" : "flex-row-reverse"}`}
+                className={`flex items-start gap-3 ${isAssistant ? "" : "flex-row-reverse"}`}
               >
                 <div
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
+                  className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
                     isAssistant
                       ? "bg-green-600 text-white"
                       : "bg-blue-600 text-white"
@@ -359,23 +383,25 @@ export default function Chat({ threadId }: { threadId: string }) {
                 </div>
 
                 <div
-                  className={`min-w-0 flex-1 rounded-2xl px-4 py-3 ${
+                  className={`min-w-0 flex-1 rounded-2xl border px-4 py-3 shadow-sm ${
                     isAssistant
-                      ? "bg-zinc-50 text-zinc-900 dark:bg-zinc-900 dark:text-zinc-100"
-                      : "bg-blue-600 text-white"
+                      ? "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100"
+                      : "border-blue-600/20 bg-blue-600 text-white"
                   }`}
                 >
                   {isAssistant ? (
-                    isActiveStream || !msg.isComplete ? (
-                      <StreamingText
-                        content={typewriter.displayed}
-                        showCursor={isActiveStream}
-                      />
-                    ) : (
-                      <MarkdownMessage content={msg.content} />
-                    )
+                    <div className="max-w-none text-[15px] leading-7">
+                      {isActiveStream || !msg.isComplete ? (
+                        <StreamingText
+                          content={typewriter.displayed}
+                          showCursor={isActiveStream}
+                        />
+                      ) : (
+                        <MarkdownMessage content={msg.content} />
+                      )}
+                    </div>
                   ) : (
-                    <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
+                    <p className="whitespace-pre-wrap text-[15px] leading-7">
                       {msg.content}
                     </p>
                   )}
@@ -387,16 +413,26 @@ export default function Chat({ threadId }: { threadId: string }) {
         <div ref={chatEndRef} />
       </div>
 
-      <div className="border-t border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+      <div
+        className={`border-t border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 ${
+          composerCompact ? "p-2.5 md:p-3" : "p-4"
+        }`}
+      >
         <div className="mx-auto max-w-3xl">
-          <div className="rounded-3xl border border-zinc-300 bg-zinc-50 p-2 shadow-sm focus-within:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:focus-within:border-zinc-500">
+          <div
+            className={`rounded-3xl border border-zinc-300 bg-zinc-50 shadow-sm focus-within:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:focus-within:border-zinc-500 ${
+              composerCompact ? "p-1.5" : "p-2"
+            }`}
+          >
             {(uploadedFiles.length > 0 ||
               Object.keys(uploadProgress).length > 0) && (
-              <div className="flex flex-wrap gap-2 px-2 pb-2">
+              <div className={`flex flex-wrap gap-2 ${composerCompact ? "px-1 pb-1" : "px-2 pb-2"}`}>
                 {uploadedFiles.map((file) => (
                   <div
                     key={file.name}
-                    className="flex max-w-full items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                    className={`flex max-w-full items-center gap-2 rounded-2xl border border-zinc-200 bg-white text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 ${
+                      composerCompact ? "px-2 py-1.5" : "px-3 py-2"
+                    }`}
                   >
                     <FileText
                       className="h-4 w-4 shrink-0 text-red-500"
@@ -425,7 +461,9 @@ export default function Chat({ threadId }: { threadId: string }) {
                 {Object.entries(uploadProgress).map(([name, progress]) => (
                   <div
                     key={name}
-                    className="flex max-w-full items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                    className={`flex max-w-full items-center gap-2 rounded-2xl border border-zinc-200 bg-white text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 ${
+                      composerCompact ? "px-2 py-1.5" : "px-3 py-2"
+                    }`}
                   >
                     <Loader2
                       className="h-4 w-4 shrink-0 animate-spin text-zinc-500"
@@ -441,16 +479,19 @@ export default function Chat({ threadId }: { threadId: string }) {
             )}
 
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              rows={2}
-              className="max-h-40 min-h-14 w-full resize-none bg-transparent px-3 py-2 text-[15px] leading-relaxed text-zinc-900 outline-none placeholder:text-zinc-500 dark:text-zinc-100"
+              rows={1}
+              className={`w-full resize-none bg-transparent px-3 text-[15px] leading-6 text-zinc-900 outline-none placeholder:text-zinc-500 transition-[height] duration-150 dark:text-zinc-100 ${
+                composerCompact ? "min-h-8 py-1" : "min-h-8 py-1"
+              }`}
               placeholder="Message AI Assistant..."
               disabled={isStreaming}
             />
 
-            <div className="flex items-center justify-between px-1 pb-1">
+            <div className={`flex items-center justify-between px-1 ${composerCompact ? "pb-0.5 pt-0" : "pb-1"}`}>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
