@@ -7,8 +7,7 @@ import re
 import uuid
 from typing import Optional, List, Dict, Any
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_mistralai import ChatMistralAI
-import os
+
 
 def generate_thread_id() -> str:
     """Generate a unique thread ID"""
@@ -239,11 +238,6 @@ def extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
     # Get unique keywords and limit count
     unique_keywords = list(dict.fromkeys(keywords))  # Preserve order while removing duplicates
     return unique_keywords[:max_keywords]
-
-def is_valid_api_key() -> bool:
-    """Check if Mistral API key is configured"""
-    api_key = os.getenv("MISTRAL_API_KEY")
-    return api_key is not None and len(api_key.strip()) > 0
 
 def create_error_response(error_message: str) -> Dict[str, Any]:
     """Create standardized error response"""
