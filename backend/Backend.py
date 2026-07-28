@@ -123,8 +123,8 @@ def get_embeddings():
 
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu", "local_files_only": True},
-        encode_kwargs={"batch_size": 64},
+        model_kwargs={"device": "cpu", "local_files_only": False},
+        encode_kwargs={"batch_size": 4},
     )
 
 # =========================================================

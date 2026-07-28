@@ -756,13 +756,26 @@ async def upload_pdf(
     if not owner_id:
         create_conversation(thread_id, Path(filename).stem or "Uploaded PDF", current_user.id)
 
+    import traceback
+
     file_bytes = await file.read()
+
+    print("=== PDF upload started ===")
+    print(f"Filename: {filename}")
+    print(f"Size: {len(file_bytes)} bytes")
+
     try:
-        return ingest_pdf(file_bytes, thread_id, filename, current_user.id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = ingest_pdf(file_bytes, thread_id, filename, current_user.id)
+        print("=== PDF ingestion completed ===")
+        return result
+
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"PDF ingestion failed: {exc}") from exc
+        print("=== PDF ingestion failed ===")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF ingestion failed: {exc}",
+        ) from exc
 
 
 @app.get("/files")
