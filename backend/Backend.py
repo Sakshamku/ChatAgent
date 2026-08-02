@@ -292,26 +292,23 @@ def ingest_pdf(
             shutil.rmtree(index_path)
         os.makedirs(index_path, exist_ok=True)
 
-        try:
-            # Batch embed for speed: encode all texts at once, then add to FAISS.
-            # local_files_only prevents upload from hanging on blocked Hugging Face network calls.
-            embeddings = get_embeddings()
-            vector_store = FAISS.from_texts(
-                texts,
-                embeddings,
-                metadatas=metadatas
-            )
-            vector_store.save_local(index_path)
-
-            retriever = vector_store.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 3}
-            )
-        except Exception as exc:
-            print(f"FAISS/Hugging Face embedding unavailable, using TF-IDF fallback: {exc}")
-            retriever = TfidfRetriever(texts, metadatas, k=3)
-            with open(_thread_fallback_retriever_path(thread_key), "wb") as retriever_file:
-                pickle.dump(retriever, retriever_file)
+        print("===== Starting retriever creation =====")
+        print(f"Total chunks: {len(texts)}")
+        
+        # TEMPORARY DEBUGGING (Skip FAISS completely)
+        
+        print("Using TF-IDF retriever instead of FAISS...")
+        
+        retriever = TfidfRetriever(
+            texts=texts,
+            metadatas=metadatas,
+            k=3
+        )
+        
+        with open(_thread_fallback_retriever_path(thread_key), "wb") as retriever_file:
+            pickle.dump(retriever, retriever_file)
+        
+        print("TF-IDF retriever created successfully")
 
         _THREAD_RETRIEVERS[thread_key] = retriever
 
