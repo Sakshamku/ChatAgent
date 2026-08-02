@@ -179,11 +179,8 @@ export default function Home() {
               Main Workspace
             </p>
             <h2 className="text-4xl font-semibold tracking-tight">
-              Chat, upload PDFs, and practice mock tests in one place.
+              Chat, Analyze Coding Profiles, Get Roadmap & Recommendations, and practice mock tests in one place.
             </h2>
-            <p className="max-w-lg text-base leading-7 text-slate-300">
-              The login system now starts on the home page, and the rest of the app opens only after a valid session is created.
-            </p>
           </div>
         </section>
       </div>
