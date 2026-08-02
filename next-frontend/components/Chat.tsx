@@ -4,7 +4,6 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   FileText,
   Loader2,
-  Plus,
   SendHorizontal,
   X,
 } from "lucide-react";
@@ -357,7 +356,7 @@ export default function Chat({ threadId }: { threadId: string }) {
               Start a conversation
             </h3>
             <p className="text-sm">
-              Ask anything - coding, PDFs, data analysis, and more.
+              Ask anything - coding,Leetcode & GFG Profile Analysis,data analysis, and more.
             </p>
           </div>
         )}
@@ -492,21 +491,7 @@ export default function Chat({ threadId }: { threadId: string }) {
             />
 
             <div className={`flex items-center justify-between px-1 ${composerCompact ? "pb-0.5 pt-0" : "pb-1"}`}>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreaming || isUploading}
-                  title="Upload PDF"
-                  className="flex h-9 w-9 items-center justify-center rounded-full border border-zinc-300 bg-white text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                >
-                  {isUploading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <Plus className="h-5 w-5" aria-hidden="true" />
-                  )}
-                </button>
-              </div>
+              <div className="flex items-center gap-2" />
 
               <button
                 type="button"
